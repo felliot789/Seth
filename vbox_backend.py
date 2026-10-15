@@ -199,6 +199,9 @@ def sdk_operation(request, manager_factory=None):
         check_target()
         try:
             mouse.putMouseEventAbsolute(guest_x, guest_y, 0, 0, 1)
+            # Let the guest's virtual input device poll the pressed state before
+            # release. Back-to-back states can collapse into an unpressed mouse.
+            time.sleep(0.08)
         finally:
             # A failed press can still have reached the VM. Always attempt release.
             # Never retry a press, including when its completion is uncertain.

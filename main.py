@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seth: explicitly triggered capture -> inference -> at most one click."""
+"""Seth: explicitly triggered capture -> inference -> one question's selections."""
 
 import argparse
 from dataclasses import asdict
@@ -14,6 +14,7 @@ import time
 from ai_client import AIError, SethAIClient
 from capture import SethCapture
 from clicker import SethClicker
+from hotkey import SethHotkey
 from settings import load_config
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
@@ -36,6 +37,7 @@ class SethEngine:
         self._cycle_lock = threading.Lock()
         self._worker = None
         self.cycle_count = 0
+        self.progress = ("idle", "Idle")
 
     def run_cycle(self):
         if not self._cycle_lock.acquire(blocking=False):
@@ -55,13 +57,18 @@ class SethEngine:
 
     def _run_locked_cycle(self):
         result = {"status": "error"}
+        completed_clicks = []
         try:
             if self.stop_event.is_set():
-                return {"status": "cancelled"}
+                result = {"status": "cancelled"}
+                return result
+            self.progress = ("capturing", "Capturing")
             self.ai.validate_config()
             frame = self.capture.capture_frame()
             LOG.info("Captured %s (VM %s, screen %s, %sx%s)", frame.path,
                      frame.display.vm_uuid, frame.display.screen, frame.display.width, frame.display.height)
+            LOG.info("Waiting for Seth to identify the answer selections...")
+            self.progress = ("thinking", "Waiting")
             raw = self.ai.analyze_screenshot(frame.path)
             decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
             if self.stop_event.is_set():
@@ -73,16 +80,40 @@ class SethEngine:
             elif not self.execute:
                 result = {"status": "dry_run", "decision": decision}
             else:
-                click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
+                self.progress = ("selecting", "Selecting")
+                if decision["action"] == "select":
+                    for selection in decision["selections"]:
+                        if self.stop_event.is_set():
+                            raise VMError("Cycle cancelled; no further selections.")
+                        self.capture.verify_target(frame, selection["click_x"], selection["click_y"])
+                        click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.stop_event)
+                        completed_clicks.append(click | {key: selection[key] for key in ("row", "choice", "option") if key in selection})
+                        self.progress = ("selecting", f"Selected {len(completed_clicks)}/{len(decision['selections'])}")
+                    result = {"status": "clicked", "decision": decision, "click_count": len(completed_clicks), "clicks": completed_clicks}
+                else:
+                    click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
+                    result = {"status": "clicked", "decision": decision, "click": click}
                 self.cycle_count += 1
-                result = {"status": "clicked", "decision": decision, "click": click}
         except (AIError, VMError, OSError, ValueError, TypeError) as error:
             result = {"status": "error", "error": str(error)}
+            if isinstance(error, AIError):
+                result["error_code"] = error.code
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
             result = {"status": "error", "error": "Unexpected cycle failure; no further action will be attempted."}
         finally:
+            status = result["status"]
+            label = {"clicked": "Done", "dry_run": "Dry run ready", "no_action": "No selection",
+                     "low_confidence": "Uncertain", "cancelled": "Cancelled", "error": "Error"}.get(status, status)
+            if result.get("error_code") in ("response_timeout", "connect_timeout"):
+                label = "API timeout"
+            if completed_clicks and status != "clicked":
+                label = f"Stopped ({len(completed_clicks)})"
+            self.progress = ("done" if status == "clicked" else status, label)
             self._cycle_lock.release()
+        if completed_clicks and result["status"] != "clicked":
+            result["clicks_completed"] = len(completed_clicks)
+            result["clicks"] = completed_clicks
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
@@ -96,10 +127,16 @@ def main():
     parser.add_argument("--config", type=Path, help="Configuration JSON; .env is loaded from its directory")
     parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
-    parser.add_argument("--execute", action="store_true", help="Enable one real click per accepted cycle (default: dry run)")
+    parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
+    parser.add_argument("--hotkey", action="store_true", help="Enable host Ctrl+P+O in listen mode (Linux keyboard permissions required)")
+    parser.add_argument("--overlay", action="store_true", help="Show a host status indicator; Ctrl+Shift+P+O toggles visibility (requires --hotkey)")
     parser.add_argument("--delay", type=float, default=0,
                         help="Wait this many seconds before sending a host trigger")
     args = parser.parse_args()
+    if args.hotkey and args.mode != "listen":
+        parser.error("--hotkey applies only to --mode listen")
+    if args.overlay and not args.hotkey:
+        parser.error("--overlay requires --hotkey")
     if not math.isfinite(args.delay) or not 0 <= args.delay <= 60:
         parser.error("--delay must be between 0 and 60 seconds")
     if args.delay and args.mode != "trigger":
@@ -135,12 +172,37 @@ def main():
             return 1 if result["status"] == "error" else 0
         engine.ai.validate_config()
         trigger = SethTrigger(config["project_dir"], engine.request_cycle)
+        overlay = None
+        hotkey = None
         try:
             trigger.start()
+            if args.overlay:
+                from overlay import SethOverlay
+                overlay = SethOverlay()
+            if args.hotkey:
+                hotkey = SethHotkey(engine.request_cycle, config.get("hotkey", {}).get("devices"),
+                                    toggle_callback=overlay.toggle if overlay is not None else None)
+            if hotkey is not None:
+                hotkey.start()
             LOG.info("Host listener ready (%s). Run: python3 main.py --mode trigger", "clicks enabled" if args.execute else "dry run")
-            trigger.serve(engine.stop_event)
+            if hotkey is not None:
+                LOG.info("Press Ctrl+P+O together, then release to capture and answer one question.")
+            if overlay is not None:
+                LOG.info("Host indicator ready. Ctrl+Shift+P+O shows/hides it without starting a cycle.")
+
+            def poll():
+                if hotkey is not None:
+                    hotkey.poll()
+                if overlay is not None:
+                    overlay.poll(engine.progress)
+
+            trigger.serve(engine.stop_event, poll=poll if hotkey is not None else None)
         finally:
             engine.stop_event.set()
+            if hotkey is not None:
+                hotkey.stop()
+            if overlay is not None:
+                overlay.stop()
             trigger.stop()
             engine.wait()
         return 0

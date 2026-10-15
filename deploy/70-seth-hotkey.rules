@@ -1,0 +1,4 @@
+# Allow the active local desktop user to use this host's built-in keyboard.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="AT Translated Set 2 keyboard", TAG+="uaccess"
+# Virtual keyboard used to forward ordinary typing while consuming Seth chords.
+SUBSYSTEM=="misc", KERNEL=="uinput", TAG+="uaccess"

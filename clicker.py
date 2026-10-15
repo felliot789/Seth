@@ -17,7 +17,7 @@ class SethClicker:
         def check():
             if stop_event is not None and stop_event.is_set():
                 raise VMError("Cycle cancelled; no click.")
-            validate_age(frame.captured_at, self.config.get("capture", {}).get("max_age_seconds", 90))
+            validate_age(frame.captured_at, self.config.get("capture", {}).get("max_age_seconds", 150))
 
         display = frame.display
         if type(x) is not int or type(y) is not int or not (0 <= x < display.width and 0 <= y < display.height):
@@ -34,5 +34,5 @@ class SethClicker:
         else:
             time.sleep(seconds)
         check()
-        return self.backend.click(frame, x, y, self.config.get("capture", {}).get("max_age_seconds", 90),
+        return self.backend.click(frame, x, y, self.config.get("capture", {}).get("max_age_seconds", 150),
                                   stop_event=stop_event)

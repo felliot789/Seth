@@ -43,3 +43,14 @@ class SethCapture:
 
     def capture_vm(self):
         return str(self.capture_frame().path)
+
+    def verify_target(self, frame, x, y):
+        """Check that a remaining control still looks like the inferred target."""
+        fresh = self.capture_frame()
+        if fresh.display != frame.display:
+            raise VMError("VM or guest display changed during selection plan; no further input.")
+        box = (max(0, x - 24), max(0, y - 24),
+               min(frame.display.width, x + 25), min(frame.display.height, y + 25))
+        with Image.open(frame.path) as before, Image.open(fresh.path) as after:
+            if before.convert("RGB").crop(box).tobytes() != after.convert("RGB").crop(box).tobytes():
+                raise VMError("Remaining answer control changed; no further input. Start a fresh cycle.")

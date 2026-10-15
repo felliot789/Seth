@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
@@ -50,10 +51,19 @@ class FakeMouse:
         self.events = []
         self.failure = None
         self.after_move = None
+        self.min_hold_seconds = 0
+        self.pressed_at = None
 
     def putMouseEventAbsolute(self, *args):
         self.events.append(args)
         record("mouse", args=args)
+        if args[-1] == 1:
+            self.pressed_at = time.monotonic()
+        elif self.pressed_at is not None:
+            held = time.monotonic() - self.pressed_at
+            self.pressed_at = None
+            if held < self.min_hold_seconds:
+                raise RuntimeError("Virtual mouse missed a press shorter than its polling interval")
         if len(self.events) == 1 and self.after_move:
             self.after_move()
         if (self.failure == "press" and args[-1] == 1

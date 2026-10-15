@@ -2,7 +2,8 @@
   "api": {
     "base_url": "",
     "model": "",
-    "timeout_seconds": 60,
+    "timeout_seconds": 240,
+    "stream": true,
     "response_format": "json_object"
   },
   "vm": {
@@ -11,7 +12,7 @@
   },
   "capture": {
     "output_dir": "captures",
-    "max_age_seconds": 90
+    "max_age_seconds": 300
   },
   "clicker": {
     "delay_ms": [200, 800]

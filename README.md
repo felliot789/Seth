@@ -1,11 +1,31 @@
 # Seth
 
 Seth runs on the VirtualBox host. An explicit host request captures the Windows
-VM's framebuffer, sends it to a vision model, and optionally selects one answer
-through VirtualBox's emulated mouse. Nothing is installed or executed by Seth
-inside Windows.
+VM's framebuffer, sends it to a vision model, and optionally selects the answers
+for one question through VirtualBox's emulated mouse. It supports single-choice,
+table classification, and multiple-answer checkbox questions. Nothing is installed
+or executed by Seth inside Windows.
 
-Capture and input use the official host VirtualBox Python SDK (`vboxapi`). Host
+Completed milestones and verification results are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+On this configured host, Seth starts automatically when you log into KDE. To
+start the whole application manually, run this from any directory:
+
+```sh
+systemctl --user start seth-listener
+```
+
+That one service starts the listener, both keyboard shortcuts, the host overlay,
+and answer selection. Start the Windows VM separately, open a question, then
+press and release **Ctrl+P+O**. **Ctrl+Shift+P+O** shows/hides the overlay.
+Check startup with `systemctl --user status seth-listener --no-pager` and
+`journalctl --user -b -u seth-listener -n 20 --no-pager`. Use
+`systemctl --user restart seth-listener` after code or `.env` changes, and
+`systemctl --user stop seth-listener` to stop the whole application.
+The examples below show individual modes and foreground alternatives; do not
+start a second listener while the service is running.
+
+VM capture and input use the official host VirtualBox Python SDK (`vboxapi`). Host
 window borders, scaling, position, focus, and desktop shortcuts are outside the
 coordinate path. X11, xdotool, xwd, and ImageMagick are no longer required.
 Windows still receives mouse events; running on the host does not guarantee
@@ -76,7 +96,10 @@ Run one dry cycle, then exit:
 ```
 
 A dry cycle captures and calls inference without clicking. Add `--execute` to
-allow one answer-selection click. `--mode manual` and `--mode test` are aliases
+allow the current question's answer selections, with a maximum of ten clicks.
+Single-choice questions use one click; classification tables use one per
+unanswered row; checkbox questions select all correct unmarked options.
+`--mode manual` and `--mode test` are aliases
 for one cycle. They do not start a listener. There is no repeat/auto-next mode.
 
 For host-triggered operation, start a listener:
@@ -84,6 +107,106 @@ For host-triggered operation, start a listener:
 ```sh
 .venv/bin/python main.py --mode listen
 ```
+
+To capture and select answers using **Ctrl+P+O**, start:
+
+```sh
+.venv/bin/python main.py --mode listen --execute --hotkey
+```
+
+Hold Ctrl, press P and O together (either order), then release all three keys.
+Seth captures the VM, waits for inference, and selects the proposed answers for
+that question. Watch the terminal for progress and completion, then use the
+shortcut again for another question. Holding the chord does not repeat it;
+requests received while busy are discarded. Answer correctness is not guaranteed.
+Omit `--execute` to test inference without selecting answers.
+
+The Linux shortcut uses [python-evdev](https://python-evdev.readthedocs.io/en/stable/usage.html)
+and works independently of desktop focus, including on Wayland. It consumes the
+P/O chord so it does not open Print/Open dialogs in Windows. A lone Ctrl+P or
+Ctrl+O is passed through when released. Release all keys before starting.
+Stop with Ctrl+C; the keyboard grab and virtual keyboard are released on exit.
+If a keyboard disconnects or input events are lost, restart the listener.
+
+The host user needs read/write access to the physical keyboard event device and
+`/dev/uinput`. On this host the built-in keyboard is `/dev/input/event0`:
+
+```sh
+sudo setfacl -m "u:$(id -un):rw" /dev/input/event0 /dev/uinput
+```
+
+This permission lasts until the devices are recreated (usually reboot). Grant it
+only to your own account; run Seth without sudo. The listener processes key state
+locally and does not log or send keystrokes. Automatic discovery ignores mouse
+devices; to select specific keyboards, add `"hotkey": {"devices":
+["/dev/input/event0"]}` to `config.json`. Press the entire chord on one keyboard.
+The socket trigger remains available alongside the keyboard shortcut.
+
+Add `--overlay` for a small status indicator at the top-right of the host desktop:
+
+```sh
+.venv/bin/pip install -r requirements-overlay.txt
+.venv/bin/python main.py --mode listen --execute --hotkey --overlay
+```
+
+**Ctrl+Shift+P+O** shows or hides the indicator; it never requests a cycle.
+Hold the modifiers before P/O, then release all keys. **Ctrl+P+O** still requests
+one cycle. The indicator reports capturing, waiting with elapsed time, selecting,
+done, or error. A connection/response timeout is labeled `API timeout`.
+Logs record when the inference POST starts and when its response arrives.
+`api.stream` is enabled in the supplied configuration so response events and
+heartbeats can keep the tunnel connection active during inference. Seth waits
+for the entire answer and a successful finish before validating or clicking;
+partial, interrupted, or truncated streams never produce clicks. A clean stream
+close after `finish_reason: "stop"` is supported even without a `[DONE]` marker.
+The supplied configuration allows 240 seconds for a streamed answer and caps the
+original screenshot age at 300 seconds, leaving time to validate and apply a plan.
+If you hide it, it stays hidden through status changes and continues tracking
+progress. A stopped partial plan shows how many selections completed; see the
+listener log for details. Stop an existing listener before starting another.
+
+The indicator is a separate Linux Qt window, with click-through input and no
+keyboard focus. It uses XWayland (`xcb`) for corner placement on KDE/Wayland.
+It is visible above host windows, including VirtualBox, and is not tied to the
+VM window's position or visibility. No overlay code runs in Windows, and the
+indicator is outside the guest framebuffer used by Seth's SDK capture.
+These properties do not establish anti-cheat compatibility or undetectability.
+
+This host uses a persistent `seth-listener` user service with both shortcuts and
+the indicator enabled. It starts when you log into the graphical desktop and
+stops on logout. It waits for your shortcut; startup does not request a cycle.
+The VM must be running before you request an answer cycle.
+
+The files in `deploy/` configure startup for this checkout at `~/work1/seth` and
+this host's built-in keyboard. The udev rules grant access to that keyboard and
+`/dev/uinput` to the active local desktop user; the module configuration loads
+`uinput` at boot. With these installed, manual `setfacl` is unnecessary after
+reboot. To install or restore this setup (adjust the service path and keyboard
+rule when moving to another machine):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/seth-listener.service ~/.config/systemd/user/
+sudo install -m 644 deploy/70-seth-hotkey.rules /etc/udev/rules.d/
+sudo install -m 644 deploy/seth-uinput.conf /etc/modules-load.d/
+sudo modprobe uinput
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=change --subsystem-match=input
+sudo udevadm trigger --action=change --subsystem-match=misc --sysname-match=uinput
+sudo udevadm settle
+systemctl --user daemon-reload
+systemctl --user enable --now seth-listener
+```
+
+Check with `systemctl --user status seth-listener` and follow progress with
+`journalctl --user -u seth-listener -f`. Use `systemctl --user restart seth-listener`
+after code/config changes, or `systemctl --user stop seth-listener` to stop it for
+this session. To disable automatic startup, use
+`systemctl --user disable --now seth-listener`. Start no second listener while the
+service is running. A newly started listener always shows the indicator.
+If KDE's display is still starting, the service retries until it can open the
+overlay. A process lock prevents duplicate listeners; an abandoned socket from a
+crash is recovered automatically after verifying that it has no live listener.
 
 Add `--execute` to the **listener** command to enable clicks. Request a cycle
 from another host terminal or over SSH:
@@ -93,31 +216,47 @@ from another host terminal or over SSH:
 ```
 
 The VM window does not need host focus. `--delay 3` optionally delays sending
-the request by three seconds. No keyboard combination is observed or injected.
+the request by three seconds. Without `--hotkey`, no keyboard combination is observed or injected.
 The trigger is a Unix socket in a directory accessible only to your host user.
 `accepted` means the request was accepted; check the listener's log for its
 result. Requests while busy are discarded. Each request returns to idle after
-one decision and at most one click. Ctrl+C or SIGTERM stops the listener and
-cancels clicking that has not been dispatched. SIGKILL cannot clean up the socket;
-remove a stale socket only after confirming the previous listener has stopped.
+one validated decision plan. Ctrl+C or SIGTERM stops the listener and
+cancels clicking that has not been dispatched. After an unclean shutdown, the
+next listener automatically recovers its abandoned socket. It refuses to replace
+a socket with a live listener or any unrelated file.
 
-Coordinates are pixels in the captured guest monitor. The SDK adapter accounts
-for that monitor's origin and VirtualBox's one-based mouse coordinates. Each
-frame records the VM UUID, session PID, state-change timestamp, monitor, size,
-and origin. The SDK rechecks those values and capture age before pressing the
+The model returns a point on a 0..1000 grid over the entire screenshot, explicitly
+declaring `coordinate_space: "normalized_1000"`. Seth converts it to actual guest
+pixels locally. Explicit `"pixels"` decisions are also accepted; a missing or
+unknown coordinate space is rejected. Model IDs are passed through unchanged.
+The SDK adapter then accounts for the monitor's origin and VirtualBox's one-based
+mouse coordinates. Each frame records the VM UUID, session PID, state-change
+timestamp, monitor, size, and origin. The SDK rechecks those values and capture age before pressing the
 button. A stopped/restarted VM, display change, stale image, invalid decision,
 low confidence, or unsupported pointing device prevents clicking. Host window
-movement and focus do not affect this check. `capture.max_age_seconds` defaults
-to 90; `clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
+movement and focus do not affect this check. The supplied `capture.max_age_seconds`
+is 300, allowing for the 240-second inference response budget;
+`clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
 pixel without jitter or simulated host cursor movement.
+
+A table or multiple-answer plan must identify its type and provide unique row
+numbers or option labels. Every point is validated before the first click, and
+the plan's confidence must meet the threshold. Before each planned selection,
+Seth captures again and checks that the target's surrounding pixels are unchanged.
+An input failure, changed target, cancellation, or stale frame stops the remaining
+plan. A partial failure reports how many clicks completed and is never retried
+automatically. The prompt asks the model to preserve existing selections and to
+abstain when it cannot reliably complete the question. Keep the page stable:
+local visual checks do not prove that the question's meaning is unchanged.
 
 Seth uses short-lived host SDK helpers so native SDK objects never cross listener
 threads. Each helper holds a shared VM session and releases it on completion.
-Input consists of a move, one left press, and a release; release is attempted even
-when pressing reports an error. Input errors are not retried, because completion
-may be uncertain. `clicked` confirms SDK event delivery, not answer correctness
-or application acceptance. Screen content can change during inference even if
-display geometry stays constant. Keep the question stable and start with a dry run.
+Input consists of a move, one left press held for 80 ms, and a release. The hold
+lets the guest's virtual input device observe the pressed state. Release is
+attempted even when pressing reports an error. Input errors are not retried,
+because completion may be uncertain. `clicked` confirms SDK event delivery,
+not answer correctness or application acceptance. Screen content can change during
+inference even if display geometry stays constant. Start with a dry run.
 The prompt excludes login, navigation, next, and submit controls and allows
 `action: "none"`; model behavior is not guaranteed.
 

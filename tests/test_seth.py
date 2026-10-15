@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -27,8 +28,18 @@ from vbox_backend import GuestDisplay, VMError, VirtualBoxBackend, sdk_operation
 from fake_vbox import FakeManager, TEST_DISPLAY
 
 
-DECISION = {"action": "click", "click_x": 150, "click_y": 100,
+DECISION = {"action": "click", "coordinate_space": "pixels", "click_x": 150, "click_y": 100,
             "confidence": 0.99, "explanation": "Select answer B."}
+
+CLASSIFICATION = {"action": "select", "selection_type": "classification", "coordinate_space": "pixels",
+                  "selections": [{"row": 1, "choice": "False", "click_x": 150, "click_y": 60},
+                                 {"row": 2, "choice": "True", "click_x": 150, "click_y": 100},
+                                 {"row": 3, "choice": "False", "click_x": 150, "click_y": 140}],
+                  "confidence": 0.99, "explanation": "Classify each row."}
+MULTIPLE_ANSWER = {"action": "select", "selection_type": "multiple_answer", "coordinate_space": "pixels",
+                   "selections": [{"option": "B", "click_x": 150, "click_y": 60},
+                                  {"option": "D", "click_x": 150, "click_y": 140}],
+                   "confidence": 0.99, "explanation": "Both B and D are correct."}
 
 
 def configuration(root):
@@ -65,8 +76,10 @@ class DecisionTests(unittest.TestCase):
         for changes in ({"click_x": -1}, {"click_x": 320}, {"click_y": 200},
                         {"click_x": True}, {"click_x": 150.1}, {"click_x": "150"},
                         {"confidence": math.nan}, {"confidence": 1.1}, {"confidence": True},
+                        {"coordinate_space": None}, {"coordinate_space": "unknown"},
                         {"explanation": []}, {"action": "submit"}):
             invalid.append(json.dumps(DECISION | changes))
+        invalid.append(json.dumps({name: value for name, value in DECISION.items() if name != "coordinate_space"}))
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(AIError):
                 self.client.parse_coordinates(raw, 320, 200)
@@ -87,6 +100,50 @@ class DecisionTests(unittest.TestCase):
                     '```json\n' + json.dumps(DECISION | {"click_x": 320}) + '\n```'):
             with self.subTest(raw=raw), self.assertRaises(AIError):
                 self.client.parse_coordinates(raw, 320, 200)
+
+    def test_normalized_points_map_to_actual_screenshot_pixels(self):
+        # Regression: Gemini located a 1920x1080 radio button with a 0..1000
+        # point. Interpreting (227,647) as pixels clicked the empty left margin.
+        raw = json.dumps(DECISION | {"coordinate_space": "normalized_1000", "click_x": 227, "click_y": 647})
+        result = self.client.parse_coordinates(raw, 1920, 1080)
+        self.assertEqual((result["click_x"], result["click_y"]), (436, 699))
+        self.assertEqual(result["coordinate_space"], "pixels")
+        for x, y, expected in ((0, 0, (0, 0)), (1000, 1000, (319, 199)), (500, 500, (160, 100))):
+            raw = json.dumps(DECISION | {"coordinate_space": "normalized_1000", "click_x": x, "click_y": y})
+            result = self.client.parse_coordinates(raw, 320, 200)
+            self.assertEqual((result["click_x"], result["click_y"]), expected)
+
+    def test_invalid_normalized_points_or_dimensions_are_rejected(self):
+        for x, y in ((-1, 500), (1001, 500), (500, 1001), (True, 500), (500, 500.1)):
+            raw = json.dumps(DECISION | {"coordinate_space": "normalized_1000", "click_x": x, "click_y": y})
+            with self.subTest(x=x, y=y), self.assertRaises(AIError):
+                self.client.parse_coordinates(raw, 1920, 1080)
+        for width, height in ((0, 1080), (1920, -1), (True, 1080)):
+            with self.subTest(width=width, height=height), self.assertRaises(AIError):
+                self.client.parse_coordinates(json.dumps(DECISION), width, height)
+
+    def test_classification_and_multiple_answer_plans_are_validated(self):
+        for plan in (CLASSIFICATION, MULTIPLE_ANSWER):
+            self.assertEqual(self.client.parse_coordinates(json.dumps(plan), 320, 200), plan)
+        invalid = [CLASSIFICATION | {"selections": []}, CLASSIFICATION | {"selections": [None]},
+                   CLASSIFICATION | {"selection_type": "unknown"},
+                   CLASSIFICATION | {"selections": CLASSIFICATION["selections"] * 4},
+                   CLASSIFICATION | {"selections": [CLASSIFICATION["selections"][0]] * 2},
+                   CLASSIFICATION | {"selections": [{"row": True, "choice": "True", "click_x": 10, "click_y": 10}]},
+                   CLASSIFICATION | {"selections": [{"row": 1, "click_x": 10, "click_y": 10}]},
+                   MULTIPLE_ANSWER | {"selections": [{"click_x": 10, "click_y": 10}]},
+                   MULTIPLE_ANSWER | {"selections": [MULTIPLE_ANSWER["selections"][0], {"option": "b", "click_x": 151, "click_y": 61}]},
+                   MULTIPLE_ANSWER | {"selections": [MULTIPLE_ANSWER["selections"][0], {"option": "D", "click_x": 150, "click_y": 60}]}]
+        for plan in invalid:
+            with self.subTest(plan=plan), self.assertRaises(AIError):
+                self.client.parse_coordinates(json.dumps(plan), 320, 200)
+
+    def test_normalized_multi_selection_points_are_converted_individually(self):
+        plan = MULTIPLE_ANSWER | {"coordinate_space": "normalized_1000",
+                                 "selections": [{"option": "B", "click_x": 469, "click_y": 300},
+                                                {"option": "D", "click_x": 469, "click_y": 700}]}
+        parsed = self.client.parse_coordinates(json.dumps(plan), 320, 200)
+        self.assertEqual([(p["click_x"], p["click_y"]) for p in parsed["selections"]], [(150, 60), (150, 140)])
 
     def test_env_file_and_environment_override(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {}, clear=True):
@@ -110,6 +167,9 @@ class CycleTests(unittest.TestCase):
         self.capture, self.analyze, self.click = [p.start() for p in self.patches]
         for p in self.patches:
             self.addCleanup(p.stop)
+        guard = patch.object(self.engine.capture, "verify_target")
+        self.verify = guard.start()
+        self.addCleanup(guard.stop)
 
     def test_exactly_one_click_then_return(self):
         self.assertEqual(self.engine.run_cycle()["status"], "clicked")
@@ -117,6 +177,25 @@ class CycleTests(unittest.TestCase):
         self.analyze.assert_called_once()
         self.click.assert_called_once()
         self.assertEqual(self.engine.cycle_count, 1)
+        self.assertEqual(self.engine.progress, ("done", "Done"))
+
+    def test_progress_tracks_capture_inference_and_selection(self):
+        observed = []
+        def capture():
+            observed.append(self.engine.progress[0])
+            return self.frame
+        def analyze(*args):
+            observed.append(self.engine.progress[0])
+            return json.dumps(DECISION)
+        def click(*args):
+            observed.append(self.engine.progress[0])
+            return {"click_x": 150, "click_y": 100}
+        self.capture.side_effect = capture
+        self.analyze.side_effect = analyze
+        self.click.side_effect = click
+        self.assertEqual(self.engine.run_cycle()["status"], "clicked")
+        self.assertEqual(observed, ["capturing", "thinking", "selecting"])
+        self.assertEqual(self.engine.progress, ("done", "Done"))
 
     def test_no_click_for_no_action_low_confidence_or_bad_coordinates(self):
         for decision, expected in (({"action": "none"}, "no_action"),
@@ -125,12 +204,63 @@ class CycleTests(unittest.TestCase):
             with self.subTest(decision=decision):
                 self.analyze.return_value = json.dumps(decision)
                 self.assertEqual(self.engine.run_cycle()["status"], expected)
+                self.assertEqual(self.engine.progress[0], expected)
                 self.click.assert_not_called()
 
     def test_dry_run_never_clicks(self):
         self.engine.execute = False
         self.assertEqual(self.engine.run_cycle()["status"], "dry_run")
         self.click.assert_not_called()
+
+    def test_one_model_plan_selects_every_table_row_or_correct_checkbox(self):
+        for plan in (CLASSIFICATION, MULTIPLE_ANSWER):
+            with self.subTest(kind=plan["selection_type"]):
+                self.click.reset_mock()
+                self.verify.reset_mock()
+                self.analyze.return_value = json.dumps(plan)
+                result = self.engine.run_cycle()
+                self.assertEqual(result["status"], "clicked", result)
+                self.assertEqual(result["click_count"], len(plan["selections"]))
+                self.assertEqual(self.click.call_count, len(plan["selections"]))
+                self.assertEqual(self.verify.call_count, len(plan["selections"]))
+                self.assertEqual([(c.args[1], c.args[2]) for c in self.click.call_args_list],
+                                 [(p["click_x"], p["click_y"]) for p in plan["selections"]])
+
+    def test_invalid_final_target_low_confidence_or_dry_plan_clicks_nothing(self):
+        invalid = CLASSIFICATION | {"selections": CLASSIFICATION["selections"][:2] +
+                                   [CLASSIFICATION["selections"][2] | {"click_x": 320}]}
+        for plan, expected in ((invalid, "error"), (CLASSIFICATION | {"confidence": 0.2}, "low_confidence")):
+            self.analyze.return_value = json.dumps(plan)
+            self.assertEqual(self.engine.run_cycle()["status"], expected)
+        self.engine.execute = False
+        self.analyze.return_value = json.dumps(CLASSIFICATION)
+        self.assertEqual(self.engine.run_cycle()["status"], "dry_run")
+        self.click.assert_not_called()
+        self.verify.assert_not_called()
+
+    def test_mid_plan_failure_or_changed_target_stops_and_reports_partial_progress(self):
+        for operation in (self.click, self.verify):
+            with self.subTest(operation=operation):
+                self.click.reset_mock(side_effect=True)
+                self.verify.reset_mock(side_effect=True)
+                operation.side_effect = [{"click_x": 150, "click_y": 60}, VMError("target changed or input failed")]
+                self.analyze.return_value = json.dumps(CLASSIFICATION)
+                result = self.engine.run_cycle()
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["clicks_completed"], 1)
+                self.assertEqual(self.engine.progress, ("error", "Stopped (1)"))
+                self.assertEqual(self.engine.cycle_count, 0)
+                self.assertLessEqual(self.click.call_count, 2)
+
+    def test_cancellation_between_table_rows_stops_further_input(self):
+        self.analyze.return_value = json.dumps(CLASSIFICATION)
+        def cancel_after_first(*args):
+            self.engine.stop_event.set()
+            return {"click_x": 150, "click_y": 60}
+        self.click.side_effect = cancel_after_first
+        result = self.engine.run_cycle()
+        self.assertEqual(result["clicks_completed"], 1)
+        self.click.assert_called_once()
 
     def test_invalid_confidence_threshold_is_rejected(self):
         for threshold in (math.nan, -0.1, 2, True):
@@ -221,6 +351,49 @@ class ClickTests(unittest.TestCase):
 
 
 class TriggerTests(unittest.TestCase):
+    def test_restarts_after_process_crash_without_manual_socket_removal(self):
+        with tempfile.TemporaryDirectory() as root:
+            script = ("import signal, sys; from trigger import SethTrigger; "
+                      "trigger = SethTrigger(sys.argv[1], lambda: True); trigger.start(); "
+                      "print('ready', flush=True); signal.pause()")
+            child = subprocess.Popen([sys.executable, "-c", script, root], stdout=subprocess.PIPE,
+                                     text=True, cwd=Path(__file__).resolve().parents[1])
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                child.kill()
+                child.wait(timeout=5)
+                trigger = SethTrigger(root, lambda: True)
+                self.assertTrue(trigger.path.exists())
+                trigger.start()
+                trigger.stop()
+                self.assertFalse(trigger.path.exists())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+                child.stdout.close()
+
+    def test_live_legacy_listener_and_regular_file_are_not_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            trigger = SethTrigger(root, lambda: True)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(trigger.path))
+                server.listen(1)
+                identity = trigger.path.stat().st_ino
+                with self.assertRaises(TriggerError):
+                    trigger.start()
+                self.assertEqual(trigger.path.stat().st_ino, identity)
+            trigger.path.unlink()
+            trigger.path.write_text("keep this file")
+            try:
+                with self.assertRaises(TriggerError):
+                    trigger.start()
+                self.assertEqual(trigger.path.read_text(), "keep this file")
+            finally:
+                trigger.path.unlink()
+            trigger.start()
+            trigger.stop()
+
     def test_host_trigger_accepts_drops_busy_and_cleans_up(self):
         with tempfile.TemporaryDirectory() as root:
             stop = threading.Event()
@@ -244,7 +417,7 @@ class TriggerTests(unittest.TestCase):
 
 
 class LocalAPI:
-    def __init__(self, decision=DECISION, status=200, content=None):
+    def __init__(self, decision=DECISION, status=200, content=None, stream_events=None):
         self.requests = []
         owner = self
         class Handler(BaseHTTPRequestHandler):
@@ -252,8 +425,11 @@ class LocalAPI:
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append((self.path, self.headers.get("Authorization"), payload))
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", "text/event-stream" if stream_events is not None else "application/json")
                 self.end_headers()
+                if stream_events is not None:
+                    self.wfile.write(stream_events.encode())
+                    return
                 result = content if content is not None else {"choices": [{"message": {"content": json.dumps(decision)}}]}
                 self.wfile.write(json.dumps(result).encode())
             def log_message(self, *args):
@@ -273,11 +449,65 @@ class LocalAPI:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_streamed_decision_is_assembled_only_after_a_successful_finish(self):
+        def event(data):
+            return "data: " + json.dumps(data) + "\n\n"
+        text = json.dumps(DECISION)
+        stream = ": heartbeat\n\n" + event({"choices": [{"index": 0, "delta": {"reasoning_content": "ignored"}}]})
+        stream += "".join(event({"choices": [{"index": 0, "delta": {"content": piece}}]}) for piece in (text[:40], text[40:]))
+        finished = stream + event({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        cases = [(finished, True), (finished + "data: [DONE]\n\n", True),
+                 (stream, False), (stream + "data: [DONE]\n\n", False),
+                 (stream + event({"choices": [{"delta": {}, "finish_reason": "length"}]}), False),
+                 (stream + event({"error": {"message": "upstream failed"}}), False),
+                 (stream + "data: broken JSON\n\n", False)]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "test.png"
+            Image.new("RGB", (320, 200)).save(path)
+            for events, valid in cases:
+                with self.subTest(valid=valid, ending=events[-60:]), LocalAPI(stream_events=events) as api:
+                    config = configuration(root)
+                    config["api"].update(base_url=api.url, stream=True)
+                    client = SethAIClient(config)
+                    if valid:
+                        self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path), 320, 200), DECISION)
+                    else:
+                        with self.assertRaises(AIError):
+                            client.analyze_screenshot(path)
+                    self.assertEqual(len(api.requests), 1)
+                    self.assertIs(api.requests[0][2]["stream"], True)
+
+    def test_stream_deadline_interruptions_and_oversized_content_are_rejected(self):
+        response = Mock()
+        response.iter_lines.return_value = iter([": heartbeat", ""])
+        with self.assertRaises(AIError) as caught:
+            SethAIClient._read_stream(response, time.monotonic() - 2, 1)
+        self.assertEqual(caught.exception.code, "response_timeout")
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "test.png"
+            Image.new("RGB", (320, 200)).save(path)
+            config = configuration(root)
+            config["api"]["stream"] = True
+            response.status_code = 200
+            response.headers = {"content-type": "text/event-stream"}
+            response.iter_lines.side_effect = requests.ConnectionError("secret")
+            with patch("ai_client.requests.post", return_value=response):
+                with self.assertRaises(AIError) as caught:
+                    SethAIClient(config).analyze_screenshot(path)
+            self.assertEqual(caught.exception.code, "stream_error")
+            self.assertNotIn("secret", str(caught.exception))
+            response.close.assert_called_once()
+        response = Mock()
+        response.iter_lines.return_value = iter(["data: " + json.dumps({"choices": [{"delta": {"content": "x" * 65537}}]}), ""])
+        with self.assertRaisesRegex(AIError, "size limit"):
+            SethAIClient._read_stream(response, time.monotonic(), 10)
+
     def test_transport_failures_are_identified_without_echoing_credentials(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "test.png"
             Image.new("RGB", (320, 200)).save(path)
-            for error, message in ((requests.Timeout("secret"), "timed out"),
+            for error, message in ((requests.Timeout("secret"), "response timed out"),
+                                   (requests.exceptions.ConnectTimeout("secret"), "connection timed out"),
                                    (requests.exceptions.SSLError("secret"), "TLS"),
                                    (requests.ConnectionError("secret"), "Cannot connect"),
                                    (requests.RequestException("secret"), "request failed")):
@@ -285,6 +515,17 @@ class HTTPTests(unittest.TestCase):
                     with self.assertRaisesRegex(AIError, message) as caught:
                         SethAIClient(configuration(root)).analyze_screenshot(path)
                     self.assertNotIn("secret", str(caught.exception))
+
+    def test_timeout_is_identified_in_cycle_status(self):
+        engine = SethEngine(configuration("/tmp"), execute=True)
+        frame = Frame(Path("dummy.png"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        with patch.object(engine.capture, "capture_frame", return_value=frame), \
+                patch.object(engine.ai, "analyze_screenshot", side_effect=AIError("Timed out", "response_timeout")), \
+                patch.object(engine.clicker, "click") as click:
+            result = engine.run_cycle()
+        self.assertEqual(result["error_code"], "response_timeout")
+        self.assertEqual(engine.progress, ("error", "API timeout"))
+        click.assert_not_called()
 
     def test_http_errors_and_invalid_response_shapes(self):
         with tempfile.TemporaryDirectory() as root:
@@ -360,6 +601,14 @@ class VirtualBoxSDKTests(unittest.TestCase):
                 self.assertTrue(manager.unlocked)
                 self.assertTrue(manager.closed)
 
+    def test_virtual_mouse_observes_press_before_release(self):
+        manager = FakeManager()
+        manager.mouse.min_hold_seconds = 0.02
+        result = sdk_operation(self.request(), lambda *args: manager)
+        self.assertEqual(result["click_x"], 150)
+        self.assertEqual([event[-1] for event in manager.mouse.events], [0, 1, 0])
+        self.assertTrue(manager.unlocked)
+
     def test_resizing_during_capture_removes_partial_file(self):
         with tempfile.TemporaryDirectory() as root:
             manager = FakeManager()
@@ -371,6 +620,26 @@ class VirtualBoxSDKTests(unittest.TestCase):
                     SethCapture(configuration(root), backend).capture_frame()
             self.assertEqual(list((Path(root) / "captures").iterdir()), [])
             self.assertTrue(manager.unlocked)
+
+    def test_plan_guard_allows_changes_elsewhere_but_rejects_changed_target(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = configuration(root)
+            display = GuestDisplay(**TEST_DISPLAY)
+            original = Path(root) / "original.png"
+            Image.new("RGB", (320, 200), "white").save(original)
+            frame = Frame(original, display, time.monotonic())
+            backend = Mock()
+            updated = Image.new("RGB", (320, 200), "white")
+            updated.putpixel((5, 5), (0, 0, 0))
+            def capture(path):
+                updated.save(path)
+                return display, time.monotonic()
+            backend.capture.side_effect = capture
+            capture = SethCapture(config, backend)
+            capture.verify_target(frame, 150, 100)
+            updated.putpixel((150, 100), (0, 0, 0))
+            with self.assertRaisesRegex(VMError, "control changed"):
+                capture.verify_target(frame, 150, 100)
 
     def test_click_helper_is_pinned_to_capture_uuid_and_receives_no_api_config(self):
         backend = VirtualBoxBackend(configuration("/tmp"))
@@ -437,6 +706,30 @@ class VirtualBoxSDKTests(unittest.TestCase):
 
 
 class VirtualBoxIntegrationTests(unittest.TestCase):
+    def test_table_and_checkbox_plans_use_one_inference_and_the_required_presses(self):
+        for plan in (CLASSIFICATION, MULTIPLE_ANSWER):
+            with self.subTest(kind=plan["selection_type"]), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                (root / "vboxapi.py").write_text("from fake_vbox import FakeManager as VirtualBoxManager\n")
+                log = root / "sdk.jsonl"
+                env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
+                       "SETH_TEST_VBOX_LOG": str(log)}
+                normalized = plan | {"coordinate_space": "normalized_1000", "selections": [
+                    point | {"click_x": round(point["click_x"] * 1000 / 320),
+                             "click_y": round(point["click_y"] * 1000 / 200)} for point in plan["selections"]]}
+                with patch.dict(os.environ, env), LocalAPI(decision=normalized) as api:
+                    config = configuration(root)
+                    config["api"]["base_url"] = api.url
+                    engine = SethEngine(config, execute=True)
+                    result = engine.run_cycle()
+                    self.assertEqual(result["status"], "clicked", result)
+                    self.assertEqual(result["click_count"], len(plan["selections"]))
+                    self.assertEqual(engine.cycle_count, 1)
+                    self.assertEqual(len(api.requests), 1)
+                    events = [json.loads(line) for line in log.read_text().splitlines()]
+                    presses = [event["args"] for event in events if event["kind"] == "mouse" and event["args"][-1] == 1]
+                    self.assertEqual(presses, [[p["click_x"] + 1, p["click_y"] + 1, 0, 0, 1] for p in plan["selections"]])
+
     def test_helper_capture_http_and_one_click_with_fake_sdk(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -444,7 +737,8 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
             log = root / "sdk.jsonl"
             env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
                    "SETH_TEST_VBOX_LOG": str(log)}
-            with patch.dict(os.environ, env), LocalAPI() as api:
+            normalized = DECISION | {"coordinate_space": "normalized_1000", "click_x": 469, "click_y": 500}
+            with patch.dict(os.environ, env), LocalAPI(decision=normalized) as api:
                 config = configuration(root)
                 config["api"]["base_url"] = api.url
                 engine = SethEngine(config, execute=True)
