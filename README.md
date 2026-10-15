@@ -1,24 +1,54 @@
 # Seth
 
-Host-side, explicitly triggered screen capture, vision inference, and at most one
-answer-selection click. This continuation lives in `/home/liot/work1/seth`; the
-handoff copy under `Documents/deepseek-harness/default-workspace/Seth` is preserved.
+Seth runs on the VirtualBox host. An explicit host request captures the Windows
+VM's framebuffer, sends it to a vision model, and optionally selects one answer
+through VirtualBox's emulated mouse. Nothing is installed or executed by Seth
+inside Windows.
 
-Install Python dependencies in a virtual environment:
+Capture and input use the official host VirtualBox Python SDK (`vboxapi`). Host
+window borders, scaling, position, focus, and desktop shortcuts are outside the
+coordinate path. X11, xdotool, xwd, and ImageMagick are no longer required.
+Windows still receives mouse events; running on the host does not guarantee
+undetectability by software inside the VM.
+
+Install Python dependencies using the Python version supported by the host's
+VirtualBox SDK:
 
 ```sh
-cd /home/liot/work1/seth
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-The host must have an X11 session, `xdotool`, `xwd` (usually in `x11-apps`), and
-ImageMagick (`magick` or `convert`). These are available on the current host.
-Run as the logged-in desktop user with that session's `DISPLAY` and `XAUTHORITY`.
-The application never invokes sudo. An X11 authorization error needs the correct
-session environment; running the entire program as root is not a configuration fix.
+Install VirtualBox's Python bindings from the same host VirtualBox distribution.
+On this Debian host they are already available to `/usr/bin/python3`. The venv
+uses `--system-site-packages` to access them. Alternatively, set `vm.sdk_python`
+to an interpreter with the SDK installed, for example `/usr/bin/python3`; the
+helper needs only the standard library and the host SDK. Do not install anything
+inside Windows. Run as the host user who owns the VM, without sudo.
 
-Edit `.env` (already created with permissions 0600):
+In `config.json`, set `vm.name` to the exact registered VM name and `vm.screen`
+to the zero-based guest monitor number (normally `0`). A `vm.uuid` setting takes
+precedence over the name. List registered and running VMs with:
+
+```sh
+VBoxManage list vms
+VBoxManage list runningvms
+```
+
+Check the connection and capture locally without calling inference or clicking:
+
+```sh
+.venv/bin/python main.py --mode status
+.venv/bin/python main.py --mode capture
+```
+
+The VM must be running with an awake, enabled guest display. Capture does not
+wake Windows. Clicking requires absolute mouse support, normally provided by a
+VirtualBox USB Tablet. If it is unavailable, configure that pointing device in
+VirtualBox while the VM is powered off. Seth never silently falls back to host
+mouse control or changes the VM's device configuration.
+
+Copy `.env.example` to `.env` if needed, then configure your vision provider:
 
 ```dotenv
 INFERENCE_BASE_URL=https://your-provider.example/v1
@@ -26,17 +56,18 @@ INFERENCE_API_KEY=your-key
 INFERENCE_MODEL=your-provider-vision-model
 ```
 
-The base URL may also be the full `/chat/completions` URL. Model names are provider
-specific: select a model that accepts image inputs. Existing environment variables
-override `.env`. Legacy `SETH_API_*` and `SETTH_API_*` names remain supported.
-Restart the listener after editing `.env`; configuration is read on startup.
-Keys are never written into `config.json`. `.env` and captured images are ignored
-by Git. The screenshot is sent to the configured inference provider.
+The base URL may also be the full `/chat/completions` URL. Select a model that
+accepts images. Environment variables override `.env`; legacy `SETH_API_*` and
+`SETTH_API_*` names remain supported. Restart the listener after editing `.env`.
+Keys are never written into `config.json`. `.env` and captures are ignored by Git.
+A normal cycle sends the screenshot to your configured inference provider.
 
-Requests use the image content format documented in the official
-[OpenAI Chat Completions API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
-Set `api.response_format` to `"json_object"` if your provider supports JSON mode,
-or `null` to omit that parameter; strict local JSON validation still applies.
+Requests use the image format in the official
+[Chat Completions API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+Set `api.response_format` to `"json_object"` if the provider supports JSON mode,
+or `null` to omit it. A single complete Markdown JSON code fence is accepted for
+gateways that add one. Local JSON, action, coordinate, and confidence validation
+still applies; surrounding prose and multiple JSON fragments are rejected.
 
 Run one dry cycle, then exit:
 
@@ -44,63 +75,65 @@ Run one dry cycle, then exit:
 .venv/bin/python main.py
 ```
 
-A dry run still captures and calls the configured API. Add `--execute` to allow
-one click. `--mode manual` and `--mode test` are aliases for one cycle; they do not
-start a listener afterward. There is no repeat/auto-next mode.
+A dry cycle captures and calls inference without clicking. Add `--execute` to
+allow one answer-selection click. `--mode manual` and `--mode test` are aliases
+for one cycle. They do not start a listener. There is no repeat/auto-next mode.
 
-For the host-only trigger, start a listener in one host terminal:
+For host-triggered operation, start a listener:
 
 ```sh
 .venv/bin/python main.py --mode listen
 ```
 
-Add `--execute` to the **listener** command when clicks should be enabled. From
-another host terminal, request one cycle and switch focus back to the VM during
-the countdown:
+Add `--execute` to the **listener** command to enable clicks. Request a cycle
+from another host terminal or over SSH:
 
 ```sh
-.venv/bin/python main.py --mode trigger --delay 3
+.venv/bin/python main.py --mode trigger
 ```
 
-When triggering over SSH or from another device, `--delay` can be omitted if the VM
-already has focus. No keyboard combination is observed or injected, including
-Ctrl+Alt+B, Ctrl+C+B, or Ctrl+P+O. A key combination delivered to the guest could
-have application-specific side effects, so no unverified replacement shortcut is
-enabled. The host trigger is a Unix socket in a directory accessible only to your
-host user. Nothing is installed inside Windows; there is no process-hiding code.
+The VM window does not need host focus. `--delay 3` optionally delays sending
+the request by three seconds. No keyboard combination is observed or injected.
+The trigger is a Unix socket in a directory accessible only to your host user.
+`accepted` means the request was accepted; check the listener's log for its
+result. Requests while busy are discarded. Each request returns to idle after
+one decision and at most one click. Ctrl+C or SIGTERM stops the listener and
+cancels clicking that has not been dispatched. SIGKILL cannot clean up the socket;
+remove a stale socket only after confirming the previous listener has stopped.
 
-`accepted` means the listener accepted the request, not that a click succeeded;
-read the listener's result log. Requests while busy return `busy` and are discarded.
-The listener returns to idle after one decision and at most one click. Ctrl+C or
-SIGTERM stops the listener, cancels pending clicking, and removes its socket.
-SIGKILL cannot run cleanup: if a socket remains, a new listener prints its path;
-remove that file only after confirming the previous listener is stopped.
+Coordinates are pixels in the captured guest monitor. The SDK adapter accounts
+for that monitor's origin and VirtualBox's one-based mouse coordinates. Each
+frame records the VM UUID, session PID, state-change timestamp, monitor, size,
+and origin. The SDK rechecks those values and capture age before pressing the
+button. A stopped/restarted VM, display change, stale image, invalid decision,
+low confidence, or unsupported pointing device prevents clicking. Host window
+movement and focus do not affect this check. `capture.max_age_seconds` defaults
+to 90; `clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
+pixel without jitter or simulated host cursor movement.
 
-`config.json` controls window name, optional `vm.window_id`, confidence threshold,
-capture age limit, movement, bounded jitter, and the delay range (default 200–800 ms).
-The window ID is rediscovered each cycle unless explicitly configured. Coordinates
-are relative to the actual screenshot dimensions; the captured window's position
-is added once. Multiple matching windows, changed geometry, lost focus, stale
-captures, invalid coordinates, API errors, and low confidence prevent clicking.
-The model can return `action: "none"`, including for login or loading screens.
-Navigation and submission controls are excluded by the prompt, which is not a
-guarantee of model behavior.
+Seth uses short-lived host SDK helpers so native SDK objects never cross listener
+threads. Each helper holds a shared VM session and releases it on completion.
+Input consists of a move, one left press, and a release; release is attempted even
+when pressing reports an error. Input errors are not retried, because completion
+may be uncertain. `clicked` confirms SDK event delivery, not answer correctness
+or application acceptance. Screen content can change during inference even if
+display geometry stays constant. Keep the question stable and start with a dry run.
+The prompt excludes login, navigation, next, and submit controls and allows
+`action: "none"`; model behavior is not guaranteed.
 
-A successful `clicked` result confirms delivery of one input event, not correctness
-of an answer or acceptance by the application. Screen content can change while
-inference runs even if the window geometry stays constant. Keep the target stable
-and start with a dry run. Timing and jitter do not guarantee undetectability.
+Implementation follows the official
+[VirtualBox SDK reference](https://download.virtualbox.org/virtualbox/7.2.2/SDKRef.pdf)
+for shared sessions, framebuffer screenshots, and absolute mouse input.
 
-Verification:
+Run verification with:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-The desktop integration test uses a separate Xvfb display, a simple local test
-window, and a mock HTTP API. It captures a real PNG, verifies the actual request,
-and observes exactly one mouse press at the expected window-relative coordinates.
-It requires `Xvfb` and `python-xlib` in addition to runtime dependencies; missing
-desktop test tools cause that test to skip. It never clicks the live VM.
-Live provider/model compatibility and guest input still require a configured API
-key and a subsequent live run.
+Tests use a fake SDK and a local mock HTTP service. The integration test runs the
+real host helper subprocesses, captures and validates a PNG, checks the actual
+vision request, and verifies one press followed by release at the expected guest
+coordinates. Tests also cover session/display changes, cancellation, stale images,
+input errors, and socket cleanup. They never connect to the live VM or provider.
+Use `--mode status`, `--mode capture`, and a dry cycle for live verification.

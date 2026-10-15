@@ -2,6 +2,7 @@
 """Seth: explicitly triggered capture -> inference -> at most one click."""
 
 import argparse
+from dataclasses import asdict
 import json
 import logging
 import math
@@ -11,10 +12,11 @@ import threading
 import time
 
 from ai_client import AIError, SethAIClient
-from capture import DesktopError, SethCapture
+from capture import SethCapture
 from clicker import SethClicker
 from settings import load_config
 from trigger import SethTrigger, TriggerError, send_trigger
+from vbox_backend import VMError, VirtualBoxBackend
 
 LOG = logging.getLogger("seth")
 
@@ -26,9 +28,10 @@ class SethEngine:
         if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise ValueError("min_confidence must be a finite number from 0 to 1.")
         self.execute = execute
-        self.capture = SethCapture(self.config)
+        self.backend = VirtualBoxBackend(self.config)
+        self.capture = SethCapture(self.config, self.backend)
         self.ai = SethAIClient(self.config)
-        self.clicker = SethClicker(self.config)
+        self.clicker = SethClicker(self.config, self.backend)
         self.stop_event = threading.Event()
         self._cycle_lock = threading.Lock()
         self._worker = None
@@ -57,9 +60,10 @@ class SethEngine:
                 return {"status": "cancelled"}
             self.ai.validate_config()
             frame = self.capture.capture_frame()
-            LOG.info("Captured %s (%sx%s)", frame.path, frame.window.width, frame.window.height)
+            LOG.info("Captured %s (VM %s, screen %s, %sx%s)", frame.path,
+                     frame.display.vm_uuid, frame.display.screen, frame.display.width, frame.display.height)
             raw = self.ai.analyze_screenshot(frame.path)
-            decision = self.ai.parse_coordinates(raw, frame.window.width, frame.window.height)
+            decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
             if self.stop_event.is_set():
                 result = {"status": "cancelled"}
             elif decision is None:
@@ -69,10 +73,10 @@ class SethEngine:
             elif not self.execute:
                 result = {"status": "dry_run", "decision": decision}
             else:
-                click = self.clicker.human_click(frame, decision["click_x"], decision["click_y"], self.stop_event)
+                click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
                 self.cycle_count += 1
                 result = {"status": "clicked", "decision": decision, "click": click}
-        except (AIError, DesktopError, OSError, ValueError, TypeError) as error:
+        except (AIError, VMError, OSError, ValueError, TypeError) as error:
             result = {"status": "error", "error": str(error)}
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
@@ -90,11 +94,11 @@ class SethEngine:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="Configuration JSON; .env is loaded from its directory")
-    parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test"), default="once",
-                        help="once/manual/test perform one cycle and exit; listen waits for host requests; trigger sends one")
+    parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
+                        help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
     parser.add_argument("--execute", action="store_true", help="Enable one real click per accepted cycle (default: dry run)")
     parser.add_argument("--delay", type=float, default=0,
-                        help="Wait this many seconds before a host trigger, allowing you to refocus the VM")
+                        help="Wait this many seconds before sending a host trigger")
     args = parser.parse_args()
     if not math.isfinite(args.delay) or not 0 <= args.delay <= 60:
         parser.error("--delay must be between 0 and 60 seconds")
@@ -104,9 +108,16 @@ def main():
     engine = None
     try:
         config = load_config(args.config)
+        if args.mode == "status":
+            print(json.dumps(VirtualBoxBackend(config).status()))
+            return 0
+        if args.mode == "capture":
+            frame = SethCapture(config).capture_frame()
+            print(json.dumps({"path": str(frame.path), "display": asdict(frame.display)}))
+            return 0
         if args.mode == "trigger":
             if args.delay:
-                LOG.info("Refocus the VM now; sending the host request in %.1f seconds.", args.delay)
+                LOG.info("Sending the host request in %.1f seconds.", args.delay)
                 time.sleep(args.delay)
             result = send_trigger(config["project_dir"])
             print(result)
@@ -135,7 +146,7 @@ def main():
         return 0
     except KeyboardInterrupt:
         return 130
-    except (AIError, DesktopError, TriggerError, OSError, ValueError, TypeError) as error:
+    except (AIError, VMError, TriggerError, OSError, ValueError, TypeError) as error:
         LOG.error("%s", error)
         return 1
     finally:

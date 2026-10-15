@@ -6,17 +6,15 @@
     "response_format": "json_object"
   },
   "vm": {
-    "window_name": "Existing-Windows-VirtualBox"
+    "name": "Existing-Windows-VirtualBox",
+    "screen": 0
   },
   "capture": {
     "output_dir": "captures",
     "max_age_seconds": 90
   },
   "clicker": {
-    "smooth_movement": true,
-    "movement_seconds": 0.3,
-    "delay_ms": [200, 800],
-    "jitter_pixels": 2
+    "delay_ms": [200, 800]
   },
   "min_confidence": 0.85
 }

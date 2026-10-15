@@ -5,25 +5,26 @@ import json
 import math
 import os
 from pathlib import Path
-import select
-import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image
+import requests
 from ai_client import AIError, SethAIClient
-from capture import DesktopError, Frame, SethCapture, Window
+from capture import Frame, SethCapture
 from clicker import SethClicker
 from main import SethEngine
 from settings import load_config
 from trigger import SethTrigger, TriggerError, send_trigger
+from vbox_backend import GuestDisplay, VMError, VirtualBoxBackend, sdk_operation
+from fake_vbox import FakeManager, TEST_DISPLAY
 
 
 DECISION = {"action": "click", "click_x": 150, "click_y": 100,
@@ -34,9 +35,9 @@ def configuration(root):
     return {
         "project_dir": str(root),
         "api": {"base_url": "http://127.0.0.1:1/v1", "api_key": "local-test-key", "model": "mock-vision"},
-        "vm": {"window_name": "Seth Integration Test"},
+        "vm": {"name": "Seth Integration Test", "screen": 0},
         "capture": {"output_dir": "captures", "max_age_seconds": 90},
-        "clicker": {"smooth_movement": False, "delay_ms": [0, 0], "jitter_pixels": 0},
+        "clicker": {"delay_ms": [0, 0]},
         "min_confidence": 0.85,
     }
 
@@ -75,6 +76,18 @@ class DecisionTests(unittest.TestCase):
             result = self.client.parse_coordinates(json.dumps(DECISION | {"click_x": x, "click_y": y}), 320, 200)
             self.assertEqual((result["click_x"], result["click_y"]), (x, y))
 
+    def test_one_complete_json_fence_is_accepted_without_relaxing_schema(self):
+        for opening in ("```json", "```", "```JSON"):
+            raw = opening + "\n" + json.dumps(DECISION) + "\n```"
+            self.assertEqual(self.client.parse_coordinates(raw, 320, 200), DECISION)
+        self.assertIsNone(self.client.parse_coordinates('```json\n{"action":"none"}\n```', 320, 200))
+        valid = '```json\n' + json.dumps(DECISION) + '\n```'
+        for raw in (valid + '\nextra text', 'Here is JSON:\n' + valid, valid + '\n' + valid,
+                    '```python\n' + json.dumps(DECISION) + '\n```',
+                    '```json\n' + json.dumps(DECISION | {"click_x": 320}) + '\n```'):
+            with self.subTest(raw=raw), self.assertRaises(AIError):
+                self.client.parse_coordinates(raw, 320, 200)
+
     def test_env_file_and_environment_override(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {}, clear=True):
             root = Path(root)
@@ -90,10 +103,10 @@ class DecisionTests(unittest.TestCase):
 class CycleTests(unittest.TestCase):
     def setUp(self):
         self.engine = SethEngine(configuration("/tmp"), execute=True)
-        self.frame = Frame(Path("dummy.png"), Window("1", 40, 60, 320, 200), time.monotonic())
+        self.frame = Frame(Path("dummy.png"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
         self.patches = [patch.object(self.engine.capture, "capture_frame", return_value=self.frame),
                         patch.object(self.engine.ai, "analyze_screenshot", return_value=json.dumps(DECISION)),
-                        patch.object(self.engine.clicker, "human_click", return_value={"click_x": 150, "click_y": 100})]
+                        patch.object(self.engine.clicker, "click", return_value={"click_x": 150, "click_y": 100})]
         self.capture, self.analyze, self.click = [p.start() for p in self.patches]
         for p in self.patches:
             self.addCleanup(p.stop)
@@ -127,7 +140,7 @@ class CycleTests(unittest.TestCase):
     def test_capture_api_or_click_failure_is_not_success(self):
         for operation in (self.capture, self.analyze, self.click):
             with self.subTest(operation=operation):
-                operation.side_effect = DesktopError("test failure")
+                operation.side_effect = VMError("test failure")
                 self.assertEqual(self.engine.run_cycle()["status"], "error")
                 self.assertEqual(self.engine.cycle_count, 0)
                 operation.side_effect = None
@@ -159,28 +172,52 @@ class CycleTests(unittest.TestCase):
 
 
 class ClickTests(unittest.TestCase):
-    def test_jitter_is_clamped_and_failure_propagates(self):
-        frame = Frame(Path("dummy"), Window("1", 40, 60, 320, 200), time.monotonic())
-        clicker = SethClicker(configuration("/tmp"))
-        clicker.options["jitter_pixels"] = 2
-        with patch.object(clicker, "check_target"), patch("clicker.random.randint", return_value=-2), patch("clicker.run_xdotool") as run:
-            self.assertEqual(clicker.human_click(frame, 0, 0)["screen_x"], 40)
-            run.assert_called_once_with("mousemove", 40, 60, "click", "1")
-            run.side_effect = DesktopError("click failed")
-            with self.assertRaises(DesktopError):
-                clicker.human_click(frame, 0, 0)
+    def setUp(self):
+        self.frame = Frame(Path("dummy"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        self.backend = Mock()
+        self.clicker = SethClicker(configuration("/tmp"), self.backend)
 
-    def test_moved_unfocused_or_stale_window_never_clicks(self):
-        frame = Frame(Path("dummy"), Window("1", 40, 60, 320, 200), time.monotonic())
-        for geometry, active, captured_at in ((Window("1", 41, 60, 320, 200), "1", frame.captured_at),
-                                              (frame.window, "2", frame.captured_at),
-                                              (frame.window, "1", time.monotonic() - 100)):
-            with self.subTest(geometry=geometry, active=active, captured_at=captured_at):
-                candidate = Frame(frame.path, frame.window, captured_at)
-                with patch("clicker.window_geometry", return_value=geometry), patch("clicker.run_xdotool", return_value=active) as run:
-                    with self.assertRaises(DesktopError):
-                        SethClicker(configuration("/tmp")).human_click(candidate, 150, 100)
-                    self.assertFalse(any(call.args[0] == "mousemove" for call in run.call_args_list))
+    def test_exact_pixels_are_forwarded_without_host_offsets_or_jitter(self):
+        self.clicker.click(self.frame, 0, 0)
+        self.backend.click.assert_called_once_with(self.frame, 0, 0, 90, stop_event=None)
+
+    def test_cancelled_stale_future_or_invalid_coordinates_do_not_reach_sdk(self):
+        stop = threading.Event()
+        stop.set()
+        for timestamp, x, y, event in ((self.frame.captured_at, 150, 100, stop),
+                                       (time.monotonic() - 100, 150, 100, None),
+                                       (time.monotonic() + 100, 150, 100, None),
+                                       (self.frame.captured_at, 320, 100, None),
+                                       (self.frame.captured_at, True, 100, None)):
+            with self.subTest(timestamp=timestamp, x=x), self.assertRaises(VMError):
+                self.clicker.click(Frame(self.frame.path, self.frame.display, timestamp), x, y, event)
+        self.backend.click.assert_not_called()
+
+    def test_stop_interrupts_delay_and_prevents_input(self):
+        event = threading.Event()
+        self.clicker.options["delay_ms"] = [10000, 10000]
+        timer = threading.Timer(0.02, event.set)
+        timer.start()
+        try:
+            start = time.monotonic()
+            with self.assertRaises(VMError):
+                self.clicker.click(self.frame, 150, 100, event)
+            self.assertLess(time.monotonic() - start, 1)
+            self.backend.click.assert_not_called()
+        finally:
+            timer.join()
+
+    def test_invalid_delays_and_sdk_failure_never_report_success(self):
+        for delay in ([1], [-1, 1], [10, 1], [0, math.nan], [True, 5], "invalid"):
+            self.clicker.options["delay_ms"] = delay
+            with self.subTest(delay=delay), self.assertRaises(VMError):
+                self.clicker.click(self.frame, 150, 100)
+        self.backend.click.assert_not_called()
+        self.clicker.options["delay_ms"] = [0, 0]
+        self.backend.click.side_effect = VMError("SDK failure")
+        with self.assertRaises(VMError):
+            self.clicker.click(self.frame, 150, 100)
+        self.backend.click.assert_called_once()
 
 
 class TriggerTests(unittest.TestCase):
@@ -236,11 +273,25 @@ class LocalAPI:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_transport_failures_are_identified_without_echoing_credentials(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "test.png"
+            Image.new("RGB", (320, 200)).save(path)
+            for error, message in ((requests.Timeout("secret"), "timed out"),
+                                   (requests.exceptions.SSLError("secret"), "TLS"),
+                                   (requests.ConnectionError("secret"), "Cannot connect"),
+                                   (requests.RequestException("secret"), "request failed")):
+                with self.subTest(error=type(error).__name__), patch("ai_client.requests.post", side_effect=error):
+                    with self.assertRaisesRegex(AIError, message) as caught:
+                        SethAIClient(configuration(root)).analyze_screenshot(path)
+                    self.assertNotIn("secret", str(caught.exception))
+
     def test_http_errors_and_invalid_response_shapes(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "test.png"
             Image.new("RGB", (320, 200)).save(path)
-            for status, content in ((401, None), (429, None), (302, None), (200, {}), (200, {"choices": []})):
+            for status, content in ((401, None), (429, None), (302, None), (200, {}), (200, {"choices": []}),
+                                    (200, {"error": {"message": "Provider rejected request"}})):
                 with self.subTest(status=status, content=content), LocalAPI(status=status, content=content) as api:
                     config = configuration(root)
                     config["api"]["base_url"] = api.url
@@ -249,68 +300,179 @@ class HTTPTests(unittest.TestCase):
                     self.assertEqual(len(api.requests), 1)
 
 
-@unittest.skipUnless(all(shutil.which(name) for name in ("Xvfb", "xwd", "xdotool")) and
-                     (shutil.which("magick") or shutil.which("convert")), "X11 test tools unavailable")
-class DesktopIntegrationTests(unittest.TestCase):
-    def test_real_capture_http_and_single_click_on_isolated_display(self):
-        try:
-            from Xlib import X, display
-        except ImportError:
-            self.skipTest("python-xlib is required only for this desktop integration test")
-        xvfb = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "800x600x24", "-nolisten", "tcp"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.addCleanup(xvfb.stderr.close)
-        self.addCleanup(xvfb.stdout.close)
-        self.addCleanup(lambda: (xvfb.terminate(), xvfb.wait(timeout=5)))
-        self.assertTrue(select.select([xvfb.stdout], [], [], 5)[0], "Xvfb did not start")
-        number = xvfb.stdout.readline().strip()
-        self.assertTrue(number.isdigit())
-        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"DISPLAY": ":" + number, "XAUTHORITY": "/dev/null"}):
-            connection = display.Display()
-            try:
-                screen = connection.screen()
-                window = screen.root.create_window(40, 60, 320, 200, 0, screen.root_depth,
-                                                   background_pixel=screen.white_pixel,
-                                                   event_mask=X.ButtonPressMask)
-                window.set_wm_name("Seth Integration Test")
-                window.map()
-                connection.sync()
-                window.set_input_focus(X.RevertToParent, X.CurrentTime)
-                gc = window.create_gc(foreground=screen.black_pixel)
-                window.draw_text(gc, 20, 30, "Test question: select B")
-                window.rectangle(gc, 120, 80, 60, 40)
-                window.draw_text(gc, 145, 105, "B")
-                connection.sync()
-                with LocalAPI() as api:
-                    config = configuration(root)
-                    config["api"]["base_url"] = api.url
-                    engine = SethEngine(config, execute=True)
-                    result = engine.run_cycle()
-                    self.assertEqual(result["status"], "clicked", result)
-                    self.assertEqual(result["click"]["screen_x"], 190)
-                    self.assertEqual(result["click"]["screen_y"], 160)
-                    presses = []
-                    deadline = time.monotonic() + 1
-                    while time.monotonic() < deadline:
-                        while connection.pending_events():
-                            event = connection.next_event()
-                            if event.type == X.ButtonPress:
-                                presses.append((event.event_x, event.event_y))
-                        if presses:
-                            break
-                        time.sleep(0.01)
-                    self.assertEqual(presses, [(150, 100)])
-                    self.assertEqual(len(api.requests), 1)
-                    route, auth, payload = api.requests[0]
-                    self.assertEqual(route, "/v1/chat/completions")
-                    self.assertEqual(auth, "Bearer local-test-key")
-                    encoded = payload["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
-                    with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
-                        self.assertEqual(image.size, (320, 200))
-                    self.assertEqual(engine.cycle_count, 1)
-                    self.assertEqual(len(list((Path(root) / "captures").glob("*.png"))), 1)
-            finally:
-                connection.close()
+class VirtualBoxSDKTests(unittest.TestCase):
+    def request(self, **changes):
+        return {"operation": "click", "target": TEST_DISPLAY["vm_uuid"], "screen": 0,
+                "expected": TEST_DISPLAY.copy(), "captured_at": time.monotonic(),
+                "max_age": 90, "x": 150, "y": 100, **changes}
+
+    def test_absolute_coordinates_include_guest_origin_and_one_based_conversion(self):
+        for x, y in ((0, 0), (319, 199)):
+            manager = FakeManager()
+            manager.console.display.origin = (-320, 120)
+            expected = TEST_DISPLAY | {"x_origin": -320, "y_origin": 120}
+            result = sdk_operation(self.request(x=x, y=y, expected=expected), lambda *args: manager)
+            expected_xy = (x - 320 + 1, y + 120 + 1, 0, 0)
+            self.assertEqual(manager.mouse.events, [expected_xy + (0,), expected_xy + (1,), expected_xy + (0,)])
+            self.assertEqual(result["click_x"], x)
+            self.assertTrue(manager.unlocked)
+            self.assertTrue(manager.closed)
+
+    def test_stale_or_changed_vm_and_unsupported_input_never_send_mouse_events(self):
+        for change in ("uuid", "resolution", "origin", "restart", "state_change", "paused", "absolute", "disabled", "screen", "stale", "future", "coordinates"):
+            with self.subTest(change=change):
+                manager = FakeManager()
+                request = self.request()
+                if change == "uuid": manager.machine.id = "different-vm"
+                if change == "resolution": manager.console.display.size = (640, 480)
+                if change == "origin": manager.console.display.origin = (320, 0)
+                if change == "restart": manager.machine.sessionPID += 1
+                if change == "state_change": manager.machine.lastStateChange += 1
+                if change == "paused": manager.machine.state = -1
+                if change == "absolute": manager.mouse.absoluteSupported = False
+                if change == "disabled": manager.console.display.status = 0
+                if change == "screen": request["screen"] = 1
+                if change == "stale": request["captured_at"] -= 100
+                if change == "future": request["captured_at"] += 100
+                if change == "coordinates": request["x"] = True
+                with self.assertRaises(VMError):
+                    sdk_operation(request, lambda *args: manager)
+                self.assertEqual(manager.mouse.events, [])
+                self.assertTrue(manager.closed)
+                if change != "paused": self.assertTrue(manager.unlocked)
+
+    def test_change_after_move_prevents_press(self):
+        manager = FakeManager()
+        manager.mouse.after_move = lambda: setattr(manager.console.display, "size", (640, 480))
+        with self.assertRaises(VMError):
+            sdk_operation(self.request(), lambda *args: manager)
+        self.assertEqual([event[-1] for event in manager.mouse.events], [0])
+        self.assertTrue(manager.unlocked)
+
+    def test_press_or_release_failure_attempts_release_and_never_retries(self):
+        for failure in ("press", "release"):
+            with self.subTest(failure=failure):
+                manager = FakeManager()
+                manager.mouse.failure = failure
+                with self.assertRaises(VMError):
+                    sdk_operation(self.request(), lambda *args: manager)
+                self.assertEqual([event[-1] for event in manager.mouse.events], [0, 1, 0])
+                self.assertTrue(manager.unlocked)
+                self.assertTrue(manager.closed)
+
+    def test_resizing_during_capture_removes_partial_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = FakeManager()
+            manager.console.display.after_capture = lambda: setattr(manager.console.display, "size", (640, 480))
+            backend = VirtualBoxBackend(configuration(root))
+            with patch.object(backend, "_request", side_effect=lambda operation, **data: sdk_operation(
+                    {"operation": operation, "target": "test", "screen": 0, **data}, lambda *args: manager)):
+                with self.assertRaises(VMError):
+                    SethCapture(configuration(root), backend).capture_frame()
+            self.assertEqual(list((Path(root) / "captures").iterdir()), [])
+            self.assertTrue(manager.unlocked)
+
+    def test_click_helper_is_pinned_to_capture_uuid_and_receives_no_api_config(self):
+        backend = VirtualBoxBackend(configuration("/tmp"))
+        frame = Frame(Path("dummy"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        process = subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "result": {}}), "")
+        with patch.dict(os.environ, {"INFERENCE_API_KEY": "test-secret"}), patch("vbox_backend.subprocess.run", return_value=process) as run:
+            backend.click(frame, 150, 100, 90)
+        request = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(request["target"], TEST_DISPLAY["vm_uuid"])
+        self.assertNotIn("api", request)
+        self.assertNotIn("local-test-key", run.call_args.kwargs["input"])
+        self.assertNotIn("INFERENCE_API_KEY", run.call_args.kwargs["env"])
+
+    def test_cancel_reaches_helper_before_press(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / "cancelled"
+            manager = FakeManager()
+            manager.mouse.after_move = lambda: marker.touch()
+            with self.assertRaisesRegex(VMError, "cancelled"):
+                sdk_operation(self.request(cancel_path=str(marker)), lambda *args: manager)
+            self.assertEqual([event[-1] for event in manager.mouse.events], [0])
+            self.assertTrue(manager.unlocked)
+
+    def test_cancellation_is_relayed_during_native_io_and_marker_is_cleaned_up(self):
+        stop = threading.Event()
+        backend = VirtualBoxBackend(configuration("/tmp"))
+        frame = Frame(Path("dummy"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        markers = []
+
+        def blocked(operation, **data):
+            marker = Path(data["cancel_path"])
+            markers.append(marker)
+            stop.set()
+            deadline = time.monotonic() + 1
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists())
+            raise VMError("Cycle cancelled; no click.")
+
+        with patch.object(backend, "_request", side_effect=blocked):
+            with self.assertRaises(VMError):
+                backend.click(frame, 150, 100, 90, stop_event=stop)
+        self.assertFalse(markers[0].parent.exists())
+
+    def test_sleeping_display_does_not_capture_or_send_input(self):
+        manager = FakeManager()
+        manager.console.display.status = 2
+        with self.assertRaisesRegex(VMError, "blank/asleep"):
+            sdk_operation({"operation": "capture", "target": "test", "screen": 0, "path": "unused.png"},
+                          lambda *args: manager)
+        self.assertTrue(manager.unlocked)
+        self.assertEqual(manager.mouse.events, [])
+
+    def test_helper_failure_or_timeout_is_not_retried(self):
+        backend = VirtualBoxBackend(configuration("/tmp"))
+        for result in (subprocess.CompletedProcess([], 1, "not json", ""),
+                       subprocess.CompletedProcess([], 1, json.dumps({"ok": False, "error": "SDK missing"}), ""),
+                       subprocess.TimeoutExpired("sdk", 30)):
+            with self.subTest(result=result), patch("vbox_backend.subprocess.run") as run:
+                if isinstance(result, Exception): run.side_effect = result
+                else: run.return_value = result
+                with self.assertRaises(VMError): backend.status()
+                run.assert_called_once()
+
+
+class VirtualBoxIntegrationTests(unittest.TestCase):
+    def test_helper_capture_http_and_one_click_with_fake_sdk(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "vboxapi.py").write_text("from fake_vbox import FakeManager as VirtualBoxManager\n")
+            log = root / "sdk.jsonl"
+            env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
+                   "SETH_TEST_VBOX_LOG": str(log)}
+            with patch.dict(os.environ, env), LocalAPI() as api:
+                config = configuration(root)
+                config["api"]["base_url"] = api.url
+                engine = SethEngine(config, execute=True)
+                result = engine.run_cycle()
+                self.assertEqual(result["status"], "clicked", result)
+                events = [json.loads(line) for line in log.read_text().splitlines()]
+                mouse = [event["args"] for event in events if event["kind"] == "mouse"]
+                self.assertEqual(mouse, [[151, 101, 0, 0, 0], [151, 101, 0, 0, 1], [151, 101, 0, 0, 0]])
+                self.assertEqual(sum(event["kind"] == "unlock" for event in events), 2)
+                self.assertEqual(sum(event["kind"] == "deinit" for event in events), 2)
+                self.assertEqual(len(api.requests), 1)
+                route, auth, payload = api.requests[0]
+                self.assertEqual(route, "/v1/chat/completions")
+                self.assertEqual(auth, "Bearer local-test-key")
+                self.assertIs(payload["stream"], False)
+                encoded = payload["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
+                with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+                    self.assertEqual(image.size, (320, 200))
+                capture = next((root / "captures").glob("*.png"))
+                self.assertEqual(capture.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(engine.cycle_count, 1)
+                # A listener worker also uses fresh helpers and remains a dry run.
+                engine.execute = False
+                self.assertTrue(engine.request_cycle())
+                engine.wait()
+                self.assertEqual(len(api.requests), 2)
+                events_after = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(sum(event["kind"] == "mouse" for event in events_after), 3)
 
 
 if __name__ == "__main__":

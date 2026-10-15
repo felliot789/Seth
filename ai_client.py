@@ -67,6 +67,7 @@ class SethAIClient:
             encoded = base64.b64encode(stream.read()).decode("ascii")
         payload = {
             "model": self.api["model"],
+            "stream": False,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}},
@@ -83,13 +84,22 @@ class SethAIClient:
                 timeout=(10, self.api.get("timeout_seconds", 60)),
                 allow_redirects=False,
             )
+        except requests.Timeout:
+            raise AIError("Inference connection or response timed out; no click was attempted.") from None
+        except requests.exceptions.SSLError:
+            raise AIError("Inference TLS verification failed; check the provider URL and host certificates.") from None
+        except requests.ConnectionError:
+            raise AIError("Cannot connect to inference; check the provider URL and host network.") from None
         except requests.RequestException:
             raise AIError("Inference request failed or timed out; no click was attempted.") from None
         try:
             if response.status_code != 200:
                 raise AIError(f"Inference returned HTTP {response.status_code}; no click was attempted.")
             try:
-                message = response.json()["choices"][0]["message"]
+                completion = response.json()
+                if isinstance(completion, dict) and completion.get("error") is not None:
+                    raise AIError("Inference returned an API error inside HTTP 200; check provider, model, vision, and JSON-mode support.")
+                message = completion["choices"][0]["message"]
                 content = message["content"]
             except (ValueError, KeyError, IndexError, TypeError):
                 raise AIError("Inference returned an invalid chat completion.") from None
@@ -100,6 +110,13 @@ class SethAIClient:
             response.close()
 
     def parse_coordinates(self, response_text, width, height):
+        # Some compatible gateways treat JSON mode as a prompt and still fence
+        # the result. Accept one complete outer fence, never extract fragments.
+        if isinstance(response_text, str):
+            lines = response_text.strip().splitlines()
+            if (len(lines) >= 3 and lines[0].strip().lower() in ("```json", "```")
+                    and lines[-1].strip() == "```"):
+                response_text = "\n".join(lines[1:-1])
         try:
             result = json.loads(response_text)
         except (ValueError, TypeError):
