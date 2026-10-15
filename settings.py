@@ -14,6 +14,8 @@ def load_config(path=None):
     load_dotenv(path.parent / ".env", override=False)
     with path.open(encoding="utf-8") as stream:
         config = json.load(stream)
+    if os.environ.get("INFERENCE_BACKEND"):
+        config.setdefault("inference", {})["backend"] = os.environ["INFERENCE_BACKEND"]
     api = config.setdefault("api", {})
     for field, names in {
         "base_url": ("INFERENCE_BASE_URL", "SETH_API_BASE_URL", "SETTH_API_BASE_URL"),

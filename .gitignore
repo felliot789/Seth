@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 captures/
 *.sock
+.browser-profile/
+.web-state/
+cookies.json
+cookies.txt
+*.cookies.json

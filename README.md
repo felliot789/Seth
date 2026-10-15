@@ -89,6 +89,89 @@ or `null` to omit it. A single complete Markdown JSON code fence is accepted for
 gateways that add one. Local JSON, action, coordinate, and confidence validation
 still applies; surrounding prose and multiple JSON fragments are rejected.
 
+## Lightpanda web inference (experimental)
+
+Seth also has a Lightpanda backend for sending the captured PNG to a model's web
+chat. Its Python controller drives the browser directly; it needs no standby AI
+agent, Playwright, Node, or desktop browser during inference. The API remains the
+default until authenticated web cycles have been verified on this host.
+
+Install the controller and the official, checksum-verified Lightpanda binary:
+
+```sh
+.venv/bin/pip install -r requirements-browser.txt
+.venv/bin/python web_inference.py --install
+```
+
+The binary lives under `~/.local/share/seth/runtime/lightpanda/`, separate from
+system packages. Each downloaded version has its SHA-256 recorded in
+`release.json`; `current` selects the installed version. Startup never downloads
+or updates the browser. Set `web.executable_path` to pin a specific binary.
+
+The configured fallback order is Gemini, ChatGPT, then Qwen. Each site needs its
+own imported sign-in session and the visible label of the selected vision model
+in `web.sites.<provider>.model_label`. ChatGPT and Qwen start with empty labels
+and are skipped until configured. Their adapter selectors are provisional and
+must be verified against the signed-in web layouts before enabling them.
+
+Use an existing browser to sign in to the provider, select its vision model, and
+export the site's cookies to a local file. Import CDP/Puppeteer JSON, Playwright
+storage-state JSON, or Netscape cookies without pasting session secrets into chat:
+
+```sh
+.venv/bin/python web_inference.py --provider gemini --import-cookies /path/to/cookies.json
+.venv/bin/python web_inference.py --provider gemini --check
+.venv/bin/python web_inference.py --provider gemini --image captures/question.png
+```
+
+The image command uploads to exactly the named provider and prints a validated
+decision; it never sends VM input. Substitute `chatgpt` or `qwen` to set up and
+test another site. Cookies are filtered to that provider's domains and stored in
+private files under `~/.local/share/seth/web/<provider>/`. Updated cookies are
+saved atomically after attempts when time and cancellation allow. Cookie import
+does not guarantee that a website will accept the session; reauthentication,
+device-bound sessions, and additional browser storage may require further work.
+
+`--check` opens an empty chat and checks login and model without uploading a
+screenshot. Once a provider passes repeated live screenshot cycles, run a Seth
+dry cycle with `.venv/bin/python main.py --backend web`. `INFERENCE_BACKEND=web`
+or `inference.backend: "web"` selects the same backend persistently. Use `api`
+to restore API inference. Restart the listener after configuration changes.
+
+Each attempt requires an empty chat, an attachment matching the PNG's filename,
+upload completion, the configured model, the current request's user message,
+and a completed answer. A one-second stable answer and absence of a generation
+control supplement the completion signal. The shared JSON, confidence, geometry,
+capture-age, and target checks still apply. A provider is tried at most once per
+cycle; errors can fall through to the next configured provider, and only the
+first valid answer reaches the clicker. An explicit `action: "none"` is accepted
+as an abstention rather than triggering more requests.
+
+`web.timeout_seconds` is the total fallback budget (240 by default).
+`web.attempt_timeout_seconds` caps an individual attempt (150 by default).
+Fallback never resets the total budget or the screenshot's original age. The
+overlay reports the current provider, upload, wait, and web errors. Results record
+the successful provider and preceding attempt error codes without session data.
+
+Lightpanda's support for file inputs does not prove compatibility with every
+site's upload preprocessing or JavaScript. Real Lightpanda tests verify a local
+PNG upload byte for byte, cookie restoration across browser restarts, complete
+answer extraction, cancellation, and failure handling. Authenticated Gemini,
+ChatGPT, and Qwen screenshot inference remains unverified; see
+[the validation record](docs/lightpanda-validation.md).
+
+Run the offline integration suite after installing Lightpanda:
+
+```sh
+SETH_LIGHTPANDA_TESTS=1 .venv/bin/python -m unittest discover -s tests -v
+```
+
+These tests serve local fixtures and never contact a model provider or live VM.
+Without `SETH_LIGHTPANDA_TESTS=1`, browser integration tests are skipped and the
+remaining configuration, fallback, API, SDK, hotkey, and overlay tests still run.
+
+## Running Seth
+
 Run one dry cycle, then exit:
 
 ```sh

@@ -11,7 +11,7 @@ import signal
 import threading
 import time
 
-from ai_client import AIError, SethAIClient
+from inference import AIError, create_client
 from capture import SethCapture
 from clicker import SethClicker
 from hotkey import SethHotkey
@@ -31,9 +31,10 @@ class SethEngine:
         self.execute = execute
         self.backend = VirtualBoxBackend(self.config)
         self.capture = SethCapture(self.config, self.backend)
-        self.ai = SethAIClient(self.config)
-        self.clicker = SethClicker(self.config, self.backend)
         self.stop_event = threading.Event()
+        self.ai = create_client(self.config, stop_event=self.stop_event,
+                                progress=lambda label: setattr(self, "progress", ("thinking", label)))
+        self.clicker = SethClicker(self.config, self.backend)
         self._cycle_lock = threading.Lock()
         self._worker = None
         self.cycle_count = 0
@@ -98,6 +99,8 @@ class SethEngine:
             result = {"status": "error", "error": str(error)}
             if isinstance(error, AIError):
                 result["error_code"] = error.code
+                if error.code == "cancelled":
+                    result["status"] = "cancelled"
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
             result = {"status": "error", "error": "Unexpected cycle failure; no further action will be attempted."}
@@ -107,6 +110,11 @@ class SethEngine:
                      "low_confidence": "Uncertain", "cancelled": "Cancelled", "error": "Error"}.get(status, status)
             if result.get("error_code") in ("response_timeout", "connect_timeout"):
                 label = "API timeout"
+            if result.get("error_code", "").startswith("browser_"):
+                label = {"browser_timeout": "Web timeout", "browser_login": "Web sign-in",
+                         "browser_limit": "Web limit", "browser_busy": "Browser busy",
+                         "browser_model": "Web model", "browser_layout": "Web layout"}.get(
+                             result["error_code"], "Web error")
             if completed_clicks and status != "clicked":
                 label = f"Stopped ({len(completed_clicks)})"
             self.progress = ("done" if status == "clicked" else status, label)
@@ -114,6 +122,10 @@ class SethEngine:
         if completed_clicks and result["status"] != "clicked":
             result["clicks_completed"] = len(completed_clicks)
             result["clicks"] = completed_clicks
+        if getattr(self.ai, "last_provider", None):
+            result["inference_provider"] = self.ai.last_provider
+        if getattr(self.ai, "last_attempts", None):
+            result["inference_attempts"] = self.ai.last_attempts
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
@@ -125,6 +137,7 @@ class SethEngine:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="Configuration JSON; .env is loaded from its directory")
+    parser.add_argument("--backend", choices=("api", "web", "gemini_web"), help="Override inference backend for this process")
     parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
     parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
@@ -145,6 +158,8 @@ def main():
     engine = None
     try:
         config = load_config(args.config)
+        if args.backend:
+            config.setdefault("inference", {})["backend"] = args.backend
         if args.mode == "status":
             print(json.dumps(VirtualBoxBackend(config).status()))
             return 0

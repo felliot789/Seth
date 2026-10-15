@@ -1,5 +1,27 @@
 # Development milestones
 
+## 2026-10-15 — Experimental Lightpanda web inference
+
+- Added a checksum-verified, private Lightpanda installation and a direct Python
+  CDP controller. Inference has no Chromium, Playwright, Node, or standby-agent
+  dependency.
+- Separated shared prompting and strict answer validation from the API transport.
+  Added `--backend web` and kept API inference as the configured default.
+- Added Gemini screenshot flow and configurable ChatGPT/Qwen adapter scaffolding,
+  ordered fallback, private per-provider cookie import/persistence, one submission
+  per provider, cancellation, and a shared total inference deadline.
+- Added local session/model checks and an image-only dry-run command, with provider
+  progress and sanitized attempt results in the host listener.
+- Verified real PNG transfer byte for byte, cookie restoration after browser
+  restart, completed-answer extraction, and failure/cancellation behavior against
+  local fixtures. Existing API and VM behavior remains covered by its tests.
+
+Authenticated screenshot inference on Gemini, ChatGPT, and Qwen is still pending.
+Their public pages load in Lightpanda on this host, but no live model screenshot
+was submitted. ChatGPT/Qwen selectors and model labels require account-specific
+verification. The detailed findings and remaining acceptance checks are recorded
+in [docs/lightpanda-validation.md](docs/lightpanda-validation.md).
+
 ## 2026-10-15 — Desktop controls, streamed inference, and startup recovery
 
 - Added Ctrl+P+O to request one answer cycle and Ctrl+Shift+P+O to toggle the host

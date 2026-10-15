@@ -1,4 +1,7 @@
 {
+  "inference": {
+    "backend": "api"
+  },
   "api": {
     "base_url": "",
     "model": "",
@@ -17,5 +20,21 @@
   "clicker": {
     "delay_ms": [200, 800]
   },
-  "min_confidence": 0.85
+  "min_confidence": 0.85,
+  "web": {
+    "providers": ["gemini", "chatgpt", "qwen"],
+    "timeout_seconds": 240,
+    "attempt_timeout_seconds": 150,
+    "sites": {
+      "gemini": {
+        "model_label": "Pro"
+      },
+      "chatgpt": {
+        "model_label": ""
+      },
+      "qwen": {
+        "model_label": ""
+      }
+    }
+  }
 }
