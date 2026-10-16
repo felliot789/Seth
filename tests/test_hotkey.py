@@ -20,7 +20,7 @@ class ChordTests(unittest.TestCase):
 
     def test_both_orders_and_both_controls_trigger_once_on_release(self):
         for ctrl in (29, 97):
-            for first, second in ((24, 25), (25, 24)):
+            for first, second in ((33, 32), (32, 33)):
                 events = [(ctrl, 1), (first, 1), (first, 2), (second, 1),
                           (second, 2), (first, 2), (first, 0), (second, 0), (ctrl, 0)]
                 output, fired = self.replay(events)
@@ -28,33 +28,49 @@ class ChordTests(unittest.TestCase):
                 self.assertEqual(fired, [8])
 
     def test_control_released_first_still_waits_for_letters(self):
-        output, fired = self.replay([(29, 1), (25, 1), (24, 1), (29, 0), (25, 0), (24, 0)])
+        output, fired = self.replay([(29, 1), (32, 1), (33, 1), (29, 0), (32, 0), (33, 0)])
         self.assertEqual(output, [(29, 1), (29, 0)])
         self.assertEqual(fired, [5])
 
     def test_normal_typing_incomplete_chords_and_extra_modifiers_pass_through(self):
         for events in (
-            [(25, 1), (25, 2), (25, 0)],
-            [(29, 1), (25, 1), (25, 0), (29, 0)],
-            [(29, 1), (24, 1), (29, 0), (24, 0)],
-            [(29, 1), (25, 1), (30, 1), (24, 1), (25, 0), (24, 0), (30, 0), (29, 0)],
-            [(42, 1), (29, 1), (25, 1), (24, 1), (24, 0), (25, 0), (29, 0), (42, 0)],
-            # P was already forwarded before Ctrl: don't consume its release.
-            [(25, 1), (29, 1), (24, 1), (24, 0), (25, 0), (29, 0)],
+            [(32, 1), (32, 2), (32, 0)],
+            [(29, 1), (32, 1), (32, 0), (29, 0)],
+            [(29, 1), (33, 1), (29, 0), (33, 0)],
+            [(29, 1), (32, 1), (30, 1), (33, 1), (32, 0), (33, 0), (30, 0), (29, 0)],
+            [(42, 1), (29, 1), (32, 1), (33, 1), (33, 0), (32, 0), (29, 0), (42, 0)],
+            # D was already forwarded before Ctrl: don't consume its release.
+            [(32, 1), (29, 1), (33, 1), (33, 0), (32, 0), (29, 0)],
         ):
             with self.subTest(events=events):
                 self.assertEqual(self.replay(events), (events, []))
 
     def test_release_rearms_for_next_question(self):
-        chord = [(29, 1), (25, 1), (24, 1), (24, 0), (25, 0), (29, 0)]
+        chord = [(29, 1), (32, 1), (33, 1), (33, 0), (32, 0), (29, 0)]
         output, fired = self.replay(chord * 2)
         self.assertEqual(fired, [5, 11])
         self.assertEqual(output, [(29, 1), (29, 0)] * 2)
 
+    def test_former_chords_pass_through_immediately_without_triggering(self):
+        for enable_toggle in (False, True):
+            for ctrl in (29, 97):
+                for shift in (None, 42, 54):
+                    for first, second in ((24, 25), (25, 24)):
+                        with self.subTest(enable_toggle=enable_toggle, ctrl=ctrl,
+                                          shift=shift, first=first):
+                            chord = ChordFilter(enable_toggle=enable_toggle)
+                            modifiers = [ctrl] + ([shift] if shift is not None else [])
+                            events = ([(key, 1) for key in modifiers]
+                                      + [(first, 1), (first, 2), (second, 1),
+                                         (second, 0), (first, 0)]
+                                      + [(key, 0) for key in reversed(modifiers)])
+                            for event in events:
+                                self.assertEqual(chord.feed(*event), ([event], False))
+
     def test_shift_chord_only_toggles_even_if_shift_releases_first(self):
         for ctrl in (29, 97):
             for shift in (42, 54):
-                for first, second in ((24, 25), (25, 24)):
+                for first, second in ((33, 32), (32, 33)):
                     chord = ChordFilter(enable_toggle=True)
                     output, actions = [], []
                     events = [(ctrl, 1), (shift, 1), (first, 1), (second, 1), (second, 2),
@@ -70,7 +86,7 @@ class ChordTests(unittest.TestCase):
     def test_shift_added_after_letters_upgrades_to_toggle(self):
         chord = ChordFilter(enable_toggle=True)
         actions = [chord.feed(*event)[1] for event in
-                   [(29, 1), (25, 1), (24, 1), (42, 1), (42, 0), (24, 0), (25, 0), (29, 0)]]
+                   [(29, 1), (32, 1), (33, 1), (42, 1), (42, 0), (33, 0), (32, 0), (29, 0)]]
         self.assertEqual([action for action in actions if action], ["toggle"])
 
 
@@ -78,7 +94,7 @@ class HotkeyTests(unittest.TestCase):
     def setUp(self):
         self.device = Mock(name="keyboard")
         self.device.name = "Test keyboard"
-        self.device.capabilities.return_value = {1: [24, 25, 29, 97]}
+        self.device.capabilities.return_value = {1: [33, 32, 29, 97]}
         self.device.active_keys.return_value = []
         self.virtual = Mock()
         self.api = SimpleNamespace(
@@ -94,7 +110,7 @@ class HotkeyTests(unittest.TestCase):
         callback = Mock(return_value=False)
         hotkey = SethHotkey(callback)
         hotkey.start()
-        events = [(29, 1), (25, 1), (24, 1), (24, 2), (24, 0), (25, 0), (29, 0)]
+        events = [(29, 1), (32, 1), (33, 1), (33, 2), (33, 0), (32, 0), (29, 0)]
         self.device.read.return_value = [SimpleNamespace(type=1, code=c, value=v) for c, v in events]
         try:
             with patch("hotkey.select.select", return_value=([self.device], [], [])):
@@ -117,14 +133,31 @@ class HotkeyTests(unittest.TestCase):
         callback, toggle = Mock(return_value=True), Mock()
         hotkey = SethHotkey(callback, toggle_callback=toggle)
         hotkey.start()
-        events = [(29, 1), (42, 1), (25, 1), (24, 1), (24, 0), (25, 0), (42, 0), (29, 0),
-                  (29, 1), (25, 1), (24, 1), (24, 0), (25, 0), (29, 0)]
+        events = [(29, 1), (42, 1), (32, 1), (33, 1), (33, 0), (32, 0), (42, 0), (29, 0),
+                  (29, 1), (32, 1), (33, 1), (33, 0), (32, 0), (29, 0)]
         self.device.read.return_value = [SimpleNamespace(type=1, code=c, value=v) for c, v in events]
         try:
             with patch("hotkey.select.select", return_value=([self.device], [], [])):
                 hotkey.poll()
             toggle.assert_called_once_with()
             callback.assert_called_once_with()
+        finally:
+            hotkey.stop()
+
+    def test_former_shortcuts_do_not_invoke_callbacks(self):
+        callback, toggle = Mock(return_value=True), Mock()
+        hotkey = SethHotkey(callback, toggle_callback=toggle)
+        hotkey.start()
+        events = [(29, 1), (25, 1), (24, 1), (24, 0), (25, 0), (29, 0),
+                  (29, 1), (42, 1), (25, 1), (24, 1), (24, 0), (25, 0), (42, 0), (29, 0)]
+        self.device.read.return_value = [SimpleNamespace(type=1, code=c, value=v) for c, v in events]
+        try:
+            with patch("hotkey.select.select", return_value=([self.device], [], [])):
+                hotkey.poll()
+            callback.assert_not_called()
+            toggle.assert_not_called()
+            self.assertEqual([call.args for call in self.virtual.write.call_args_list],
+                             [(1, code, value) for code, value in events])
         finally:
             hotkey.stop()
 

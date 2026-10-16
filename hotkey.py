@@ -1,4 +1,4 @@
-"""Linux Ctrl+P+O trigger with chord suppression, including on Wayland."""
+"""Linux Ctrl+D+F trigger with chord suppression, including on Wayland."""
 
 import logging
 import select
@@ -9,12 +9,12 @@ LOG = logging.getLogger("seth")
 # Stable Linux input-event key codes. Import evdev only when the shortcut is used.
 CTRL = {29, 97}
 SHIFT = {42, 54}
-LETTERS = {24, 25}  # O, P
+LETTERS = {32, 33}  # D, F
 CHORD = CTRL | SHIFT | LETTERS
 
 
 class ChordFilter:
-    """Delay Ctrl+P/O until release; consume both when the chord completes.
+    """Delay Ctrl+D/F until release; consume both when the chord completes.
 
     Fire only after all chord keys are released so Ctrl cannot modify VM clicks.
     Holding keys, autorepeat, or an incomplete chord never queues extra cycles.
@@ -55,7 +55,7 @@ class ChordFilter:
                 self.matched = "toggle" if self.down & SHIFT else "cycle"
             return output, False
 
-        # An incomplete chord remains an ordinary Ctrl+P or Ctrl+O shortcut.
+        # An incomplete chord remains an ordinary Ctrl+D or Ctrl+F shortcut.
         # Flush before Ctrl-up or another key to preserve the original ordering.
         if self.pending:
             output.extend(self.pending)
@@ -78,7 +78,7 @@ class SethHotkey:
         try:
             import evdev
         except ImportError:
-            raise TriggerError("Ctrl+P+O needs evdev. Install requirements.txt in your venv.") from None
+            raise TriggerError("Ctrl+D+F needs evdev. Install requirements.txt in your venv.") from None
         self.evdev = evdev
         if self.paths is not None and (not isinstance(self.paths, list)
                                       or not all(isinstance(p, str) for p in self.paths)):
@@ -107,10 +107,10 @@ class SethHotkey:
                     if device is not None:
                         device.close()
             if not self.devices:
-                raise TriggerError("No accessible keyboard for Ctrl+P+O. Run the keyboard permission setup in README.md.")
+                raise TriggerError("No accessible keyboard for Ctrl+D+F. Run the keyboard permission setup in README.md.")
         except OSError as error:
             self.stop()
-            raise TriggerError("Cannot open/grab the keyboard or /dev/uinput for Ctrl+P+O. "
+            raise TriggerError("Cannot open/grab the keyboard or /dev/uinput for Ctrl+D+F. "
                                "Check keyboard permissions (README.md) and other shortcut listeners. "
                                f"System error: {error.strerror}") from None
         except Exception:
@@ -136,10 +136,10 @@ class SethHotkey:
                     virtual.syn()
                     if fired == "toggle":
                         self.toggle_callback()
-                        LOG.info("Ctrl+Shift+P+O: indicator visibility toggled")
+                        LOG.info("Ctrl+Shift+D+F: indicator visibility toggled")
                     elif fired:
                         accepted = self.callback()
-                        LOG.info("Ctrl+P+O: %s", "cycle requested" if accepted else "busy; request discarded")
+                        LOG.info("Ctrl+D+F: %s", "cycle requested" if accepted else "busy; request discarded")
                 else:
                     virtual.write_event(event)
 

@@ -17,7 +17,7 @@ systemctl --user start seth-listener
 
 That one service starts the listener, both keyboard shortcuts, the host overlay,
 and answer selection. Start the Windows VM separately, open a question, then
-press and release **Ctrl+P+O**. **Ctrl+Shift+P+O** shows/hides the overlay.
+press and release **Ctrl+D+F**. **Ctrl+Shift+D+F** shows/hides the overlay.
 Check startup with `systemctl --user status seth-listener --no-pager` and
 `journalctl --user -b -u seth-listener -n 20 --no-pager`. Use
 `systemctl --user restart seth-listener` after code or `.env` changes, and
@@ -245,13 +245,13 @@ For host-triggered operation, start a listener:
 .venv/bin/python main.py --mode listen
 ```
 
-To capture and select answers using **Ctrl+P+O**, start:
+To capture and select answers using **Ctrl+D+F**, start:
 
 ```sh
 .venv/bin/python main.py --mode listen --execute --hotkey
 ```
 
-Hold Ctrl, press P and O together (either order), then release all three keys.
+Hold Ctrl, press D and F together (either order), then release all three keys.
 Seth captures the VM, waits for inference, and selects the proposed answers for
 that question. Watch the terminal for progress and completion, then use the
 shortcut again for another question. Holding the chord does not repeat it;
@@ -260,8 +260,9 @@ Omit `--execute` to test inference without selecting answers.
 
 The Linux shortcut uses [python-evdev](https://python-evdev.readthedocs.io/en/stable/usage.html)
 and works independently of desktop focus, including on Wayland. It consumes the
-P/O chord so it does not open Print/Open dialogs in Windows. A lone Ctrl+P or
-Ctrl+O is passed through when released. Release all keys before starting.
+D/F chord so it does not activate the guest's individual shortcuts. A lone Ctrl+D
+or Ctrl+F is passed through when released. Ctrl+P and Ctrl+O pass through normally.
+Release all keys before starting.
 Stop with Ctrl+C; the keyboard grab and virtual keyboard are released on exit.
 If a keyboard disconnects or input events are lost, restart the listener.
 
@@ -286,8 +287,8 @@ Add `--overlay` for a small status indicator at the top-right of the host deskto
 .venv/bin/python main.py --mode listen --execute --hotkey --overlay
 ```
 
-**Ctrl+Shift+P+O** shows or hides the indicator; it never requests a cycle.
-Hold the modifiers before P/O, then release all keys. **Ctrl+P+O** still requests
+**Ctrl+Shift+D+F** shows or hides the indicator; it never requests a cycle.
+Hold the modifiers before D/F, then release all keys. **Ctrl+D+F** still requests
 one cycle. The indicator reports capturing, waiting with elapsed time, selecting,
 done, or error. A connection/response timeout is labeled `API timeout`.
 Logs record when the inference POST starts and when its response arrives.

@@ -146,8 +146,8 @@ def main():
     parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
     parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
-    parser.add_argument("--hotkey", action="store_true", help="Enable host Ctrl+P+O in listen mode (Linux keyboard permissions required)")
-    parser.add_argument("--overlay", action="store_true", help="Show a host status indicator; Ctrl+Shift+P+O toggles visibility (requires --hotkey)")
+    parser.add_argument("--hotkey", action="store_true", help="Enable host Ctrl+D+F in listen mode (Linux keyboard permissions required)")
+    parser.add_argument("--overlay", action="store_true", help="Show a host status indicator; Ctrl+Shift+D+F toggles visibility (requires --hotkey)")
     parser.add_argument("--delay", type=float, default=0,
                         help="Wait this many seconds before sending a host trigger")
     args = parser.parse_args()
@@ -206,9 +206,9 @@ def main():
                 hotkey.start()
             LOG.info("Host listener ready (%s). Run: python3 main.py --mode trigger", "clicks enabled" if args.execute else "dry run")
             if hotkey is not None:
-                LOG.info("Press Ctrl+P+O together, then release to capture and answer one question.")
+                LOG.info("Press Ctrl+D+F together, then release to capture and answer one question.")
             if overlay is not None:
-                LOG.info("Host indicator ready. Ctrl+Shift+P+O shows/hides it without starting a cycle.")
+                LOG.info("Host indicator ready. Ctrl+Shift+D+F shows/hides it without starting a cycle.")
 
             def poll():
                 if hotkey is not None:

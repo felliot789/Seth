@@ -1,5 +1,13 @@
 # Development milestones
 
+## 2026-10-16 — Shortcut remapping
+
+- Changed the answer-cycle shortcut to Ctrl+D+F and the overlay toggle to
+  Ctrl+Shift+D+F. Both still activate after release and consume their letter keys;
+  incomplete shortcuts and the former P/O chords pass through normally.
+- Verified both key orders, left/right modifiers, repeated keys, separate cycle
+  and overlay callbacks, release/rearming, and passthrough of the former chords.
+
 ## 2026-10-16 — MCMA confirmation and answer diagnostics
 
 - The user confirmed working live Gemini inference for single-choice, table
