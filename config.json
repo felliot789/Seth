@@ -1,6 +1,6 @@
 {
   "inference": {
-    "backend": "api"
+    "backend": "web"
   },
   "api": {
     "base_url": "",
@@ -27,7 +27,10 @@
     "attempt_timeout_seconds": 150,
     "sites": {
       "gemini": {
-        "model_label": "Pro"
+        "engine": "chromium",
+        "keep_browser_open": true,
+        "model_label": "Argon",
+        "thinking_label": "Medium"
       },
       "chatgpt": {
         "model_label": ""

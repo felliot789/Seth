@@ -96,34 +96,73 @@ or `null` to omit it. A single complete Markdown JSON code fence is accepted for
 gateways that add one. Local JSON, action, coordinate, and confidence validation
 still applies; surrounding prose and multiple JSON fragments are rejected.
 
-## Lightpanda web inference (experimental)
+## Browser web inference (experimental)
 
-Seth also has a Lightpanda backend for sending the captured PNG to a model's web
-chat. Its Python controller drives the browser directly; it needs no standby AI
-agent, Playwright, Node, or desktop browser during inference. The API remains the
-default until authenticated web cycles have been verified on this host.
+Seth also has a web backend for sending the captured PNG to a model's web chat.
+Its Python controller drives either Lightpanda or an installed Chromium/Chrome
+directly over CDP. It needs no standby AI agent, Playwright, or Node. This host now
+uses Gemini web by default after three controlled screenshot tests and a real VM
+dry cycle passed. Set `inference.backend` to `"api"` to restore API inference.
 
-Install the controller and the official, checksum-verified Lightpanda binary:
+Install the controller:
 
 ```sh
 .venv/bin/pip install -r requirements-browser.txt
-.venv/bin/python web_inference.py --install
 ```
 
-The binary lives under `~/.local/share/seth/runtime/lightpanda/`, separate from
+Gemini is configured with `web.sites.gemini.engine: "chromium"` because the
+current Lightpanda build fails to initialize its signed-in chat on this host.
+Gemini also sets `keep_browser_open: true`: its dedicated browser stays open
+between requests, and the Python controller reconnects to the same chat tab.
+You can minimize that window; no standby agent is needed. This avoids transferring
+or repeatedly restarting the authenticated session. Set
+`web.chromium_executable_path` if the executable is outside the normal PATH.
+Exported cookies are not re-imported over the native profile.
+
+To select Lightpanda for a provider, set its `engine` to `"lightpanda"` and run
+`.venv/bin/python web_inference.py --install`. This is also the default engine for
+providers without an override. The verified official binary lives under
+`~/.local/share/seth/runtime/lightpanda/`, separate from
 system packages. Each downloaded version has its SHA-256 recorded in
 `release.json`; `current` selects the installed version. Startup never downloads
 or updates the browser. Set `web.executable_path` to pin a specific binary.
 
 The configured fallback order is Gemini, ChatGPT, then Qwen. Each site needs its
-own imported sign-in session and the visible label of the selected vision model
+own sign-in session and the visible label of the selected vision model
 in `web.sites.<provider>.model_label`. ChatGPT and Qwen start with empty labels
 and are skipped until configured. Their adapter selectors are provisional and
 must be verified against the signed-in web layouts before enabling them.
 
-Use an existing browser to sign in to the provider, select its vision model, and
-export the site's cookies to a local file. Import CDP/Puppeteer JSON, Playwright
-storage-state JSON, or Netscape cookies without pasting session secrets into chat:
+The login helper uses an installed Chromium/Chrome browser for manual sign-in.
+It saves the native profile for Chromium and exports only the selected site's
+cookies for Lightpanda:
+
+```sh
+.venv/bin/python web_inference.py --provider gemini --login
+```
+
+Sign in on the KDE desktop and select the configured model and thinking level.
+For Gemini, keep the window open after the helper reports that it is ready; it
+hands that exact session to Seth. Other providers close normally unless their
+`keep_browser_open` setting is enabled. The cookie export is saved immediately.
+For another installed executable, add
+`--login-browser /path/to/chromium` and set the same executable in configuration.
+Lightpanda itself needs no desktop browser during inference.
+
+The managed browser endpoint is bound to loopback and recorded privately alongside
+the native profile under `~/.local/share/seth/web/<provider>/`. Stop the managed
+browser normally with:
+
+```sh
+.venv/bin/python web_inference.py --provider gemini --close-browser
+```
+
+Closing this browser or restarting the computer may require `--login` again.
+The API backend is available while web authentication is being repaired.
+
+For Lightpanda, alternatively use an existing browser to export the site's cookies
+to a local file. Import CDP/Puppeteer JSON, Playwright storage-state JSON, or
+Netscape cookies without pasting session secrets into chat:
 
 ```sh
 .venv/bin/python web_inference.py --provider gemini --import-cookies /path/to/cookies.json
@@ -135,17 +174,20 @@ The image command uploads to exactly the named provider and prints a validated
 decision; it never sends VM input. Substitute `chatgpt` or `qwen` to set up and
 test another site. Cookies are filtered to that provider's domains and stored in
 private files under `~/.local/share/seth/web/<provider>/`. Updated cookies are
-saved atomically after attempts when time and cancellation allow. Cookie import
-does not guarantee that a website will accept the session; reauthentication,
+saved atomically after successful operations when time and cancellation allow.
+Failed operations preserve the imported session. Cookie import does not
+guarantee that a website will accept the session; reauthentication,
 device-bound sessions, and additional browser storage may require further work.
 
-`--check` opens an empty chat and checks login and model without uploading a
-screenshot. Once a provider passes repeated live screenshot cycles, run a Seth
-dry cycle with `.venv/bin/python main.py --backend web`. `INFERENCE_BACKEND=web`
+`--check` opens an empty chat and checks login, model, and any configured thinking
+label without uploading a screenshot. `web.sites.gemini.thinking_label` is
+`"Medium"` on this host. Run a Seth dry cycle with
+`.venv/bin/python main.py --backend web`. `INFERENCE_BACKEND=web`
 or `inference.backend: "web"` selects the same backend persistently. Use `api`
 to restore API inference. Restart the listener after configuration changes.
 
-Each attempt requires an empty chat, an attachment matching the PNG's filename,
+Each attempt starts an empty chat using the site's new-chat control when reusing
+a live session, and requires an attachment matching the PNG's filename,
 upload completion, the configured model, the current request's user message,
 and a completed answer. A one-second stable answer and absence of a generation
 control supplement the completion signal. The shared JSON, confidence, geometry,
@@ -161,21 +203,24 @@ overlay reports the current provider, upload, wait, and web errors. Results reco
 the successful provider and preceding attempt error codes without session data.
 
 Lightpanda's support for file inputs does not prove compatibility with every
-site's upload preprocessing or JavaScript. Real Lightpanda tests verify a local
+site's upload preprocessing or JavaScript. Tests with both real engines verify a local
 PNG upload byte for byte, cookie restoration across browser restarts, complete
-answer extraction, cancellation, and failure handling. Authenticated Gemini,
-ChatGPT, and Qwen screenshot inference remains unverified; see
+answer extraction, cancellation, and failure handling. Gemini screenshot inference
+has also passed live checks using the persistent Chromium session. ChatGPT and
+Qwen still require account setup and independent live checks; see
 [the validation record](docs/lightpanda-validation.md).
 
-Run the offline integration suite after installing Lightpanda:
+Run the offline integration suites with installed browser engines:
 
 ```sh
-SETH_LIGHTPANDA_TESTS=1 .venv/bin/python -m unittest discover -s tests -v
+SETH_LIGHTPANDA_TESTS=1 SETH_CHROMIUM_TESTS=1 SETH_LOGIN_TESTS=1 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 These tests serve local fixtures and never contact a model provider or live VM.
-Without `SETH_LIGHTPANDA_TESTS=1`, browser integration tests are skipped and the
-remaining configuration, fallback, API, SDK, hotkey, and overlay tests still run.
+Each environment flag enables that engine's local integration tests; without
+them, browser integration tests are skipped. Configuration, fallback, API, SDK,
+hotkey, and overlay tests still run. The login helper test uses a local fixture
+with an installed Chromium browser.
 
 ## Running Seth
 

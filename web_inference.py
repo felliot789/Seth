@@ -1,4 +1,4 @@
-"""Lightpanda screenshot inference with per-site adapters and bounded fallback."""
+"""Browser screenshot inference with per-site adapters and bounded fallback."""
 
 import argparse
 from contextlib import contextmanager
@@ -14,6 +14,7 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
+from chromium_runtime import Chromium, close_managed_browser, find_chromium
 from inference import AIError, DecisionClient, build_prompt, screenshot_size
 from lightpanda_runtime import DEFAULT_BINARY, Lightpanda, install_lightpanda, write_private_json
 from settings import load_config
@@ -27,11 +28,11 @@ SITES = {
         "selectors": {
             "editor": 'rich-textarea [contenteditable="true"][role="textbox"]',
             "model": '[data-test-id="bard-mode-menu-button"]',
-            "file": 'input[type="file"]',
-            "upload": 'button[aria-label="Upload & tools"], button[aria-label="Open upload file menu"]',
+            "file": 'input[type="file"][accept*="image"]',
+            "upload": 'button[aria-label="Upload & tools"], button[aria-label="Upload and tools"], button[aria-label="Open upload file menu"]',
             "upload_item": '[role="menuitem"]',
             "attachment": 'uploader-file-preview',
-            "upload_busy": 'uploader-file-preview [role="progressbar"], uploader-file-preview mat-spinner',
+            "upload_busy": 'uploader-file-preview [role="progressbar"], uploader-file-preview mat-spinner, uploader-file-preview mat-progress-spinner',
             "send": 'button[aria-label="Send message"], button[aria-label="Submit"]',
             "user": 'user-query',
             "response": 'model-response',
@@ -39,6 +40,7 @@ SITES = {
             "complete": 'button[aria-label="Copy"], button[aria-label="Copy response"]',
             "stop": 'button[aria-label="Stop response"], button[aria-label="Stop generating"]',
             "error": '[role="alert"], .error-message',
+            "new_chat": 'a[aria-label="New chat"], button[aria-label="New chat"]',
         },
     },
     # These adapters are available for account-specific configuration and testing.
@@ -89,15 +91,16 @@ SITES = {
 
 # Lightpanda computes styles but does not provide desktop layout geometry.
 # Treat elements hidden by their own or ancestor styles as unavailable.
-DOM_HELPERS = """
+DOM_HELPERS = r"""
 const visible=e=>{for(let p=e;p&&p.nodeType===1;p=p.parentElement){
     const s=getComputedStyle(p);if(p.hidden||p.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden')return false;
 }return true;};
 const all=(s,scope=document)=>Array.from(scope.querySelectorAll(s)).filter(visible);
 const text=e=>e?(e.textContent||'').trim():'';
+const described=e=>(e.getAttribute('aria-describedby')||'').split(/\s+/).map(id=>text(document.getElementById(id))).join(' ');
 const label=e=>[text(e),e.getAttribute('aria-label')||'',e.getAttribute('title')||'',
-    ...Array.from(e.querySelectorAll('[aria-label],[title],img[alt]')).map(x=>
-    [x.getAttribute('aria-label')||'',x.getAttribute('title')||'',x.getAttribute('alt')||''].join(' '))].join(' ');
+    described(e),...Array.from(e.querySelectorAll('[aria-label],[title],img[alt],[aria-describedby]')).map(x=>
+    [x.getAttribute('aria-label')||'',x.getAttribute('title')||'',x.getAttribute('alt')||'',described(x)].join(' '))].join(' ');
 """
 
 
@@ -114,6 +117,7 @@ class SiteAdapter:
         self.options = options or {}
         self.selectors = self.site["selectors"] | self.options.get("selectors", {})
         self.model_label = self.options.get("model_label", self.site["model_label"])
+        self.thinking_label = self.options.get("thinking_label", "")
 
     def snapshot(self, page):
         return dom(page, """
@@ -135,7 +139,8 @@ return {url:location.href,editors:all(s.editor).length,
  send:all(s.send).length===1&&!all(s.send)[0].disabled&&all(s.send)[0].getAttribute('aria-disabled')!=='true',
  complete:response&&all(s.complete,response).length>0,stopped:all(s.stop).length===0,
  errors:all(s.error).map(text),
- login:all('a,button').some(e=>/^(sign in|log in|login)$/i.test(text(e))),
+ login:all('a,button').some(e=>/^(sign in|log in|login)$/i.test(text(e))||
+ /^(sign in|log in|login)$/i.test(e.getAttribute('aria-label')||'')),
  challenge:!!document.querySelector('#challenge-running,#challenge-form,[data-testid="challenge"]')};
 """, self.selectors)
 
@@ -158,6 +163,9 @@ return {url:location.href,editors:all(s.editor).length,
         if state["modelCount"] != 1 or not re.search(
                 r"(?<!\w)" + re.escape(self.model_label.strip()) + r"(?!\w)", state["model"], re.I):
             raise AIError(f"{self.name}: the selected model does not match the configured model label.", "browser_model")
+        if self.thinking_label.strip() and not re.search(
+                r"(?<!\w)" + re.escape(self.thinking_label.strip()) + r"(?!\w)", state["model"], re.I):
+            raise AIError(f"{self.name}: the thinking level does not match the configured label.", "browser_model")
 
     def wait_state(self, page, condition):
         def poll():
@@ -167,8 +175,17 @@ return {url:location.href,editors:all(s.editor).length,
         return page.wait(poll)
 
     def prepare(self, page):
-        page.navigate(self.site["url"])
-        state = self.wait_state(page, lambda s: s["editors"] and s["modelCount"])
+        starting_new = False
+        if getattr(page, "reuse_page", False):
+            state = self.snapshot(page)
+            self.check_state(state)
+            if state["users"] or state["responses"]:
+                self.click(page, self.selectors.get("new_chat", '[data-seth-missing-new-chat]'))
+                starting_new = True
+        else:
+            page.navigate(self.site["url"])
+        state = self.wait_state(page, lambda s: s["editors"] and s["modelCount"] and (
+            not starting_new or not (s["users"] or s["responses"])))
         if state["editors"] != 1 or state["users"] or state["responses"] or state["attachments"]:
             raise AIError(f"{self.name}: expected one empty chat and no existing attachment.", "browser_layout")
         self.verify_model(state)
@@ -188,17 +205,37 @@ matches[0].click();return true;
             return dom(page, """
 const inputs=Array.from(document.querySelectorAll(args[0]));
 if(inputs.length!==1)return null;
+inputs[0].value='';
 inputs[0].setAttribute('data-seth-upload',args[1]);return '[data-seth-upload="'+args[1]+'"]';
 """, self.selectors["file"], uuid.uuid4().hex)
         selector = select_input()
         if not selector:
             self.click(page, self.selectors["upload"])
-            self.click(page, self.selectors["upload_item"], self.options.get("upload_text", "Upload files"))
-            selector = page.wait(select_input)
+            upload_text = self.options.get("upload_text", "Upload files")
+            def menu_ready():
+                selected = select_input()
+                if selected:
+                    return selected
+                ready = dom(page, "return all(args[0]).filter(e=>text(e).toLowerCase()===args[1].toLowerCase()).length===1;",
+                            self.selectors["upload_item"], upload_text)
+                return "menu" if ready else None
+            selector = page.wait(menu_ready)
+            if selector == "menu":
+                self.click(page, self.selectors["upload_item"], upload_text)
+                selector = page.wait(select_input)
         page.set_file(selector, image_path)
         state = self.wait_state(page, lambda s: len(s["attachments"]) == 1
-                                and image_path.name in s["attachments"][0] and not s["uploading"] and s["send"])
+                                and self.attachment_matches(s["attachments"][0], image_path)
+                                and not s["uploading"] and s["send"])
         self.verify_model(state)
+
+    def attachment_matches(self, label, image_path):
+        # Gemini's image preprocessing adds six hexadecimal characters before the extension.
+        # Require the complete original stem and extension, not an arbitrary image.
+        name = re.escape(image_path.name)
+        if self.name == "gemini":
+            name = re.escape(image_path.stem) + r"(?:_[0-9a-f]{6})?" + re.escape(image_path.suffix)
+        return bool(re.search(r"(?<![\w.-])" + name + r"(?![\w.-])", label))
 
     def exchange(self, page, image_path, prompt, report):
         self.prepare(page)
@@ -277,6 +314,15 @@ class WebInferenceClient(DecisionClient):
     def adapter(self, provider):
         return SiteAdapter(provider, self.web.get("sites", {}).get(provider, {}))
 
+    def engine(self, provider):
+        return self.web.get("sites", {}).get(provider, {}).get("engine", self.web.get("engine", "lightpanda"))
+
+    def login_profile(self, provider):
+        return self.state_dir / provider / "native-profile"
+
+    def native_state_file(self, provider):
+        return self.state_dir / provider / "native-browser.json"
+
     def validate_config(self):
         self.last_provider, self.last_attempts = None, []
         providers = self.web.get("providers", ["gemini"])
@@ -293,15 +339,27 @@ class WebInferenceClient(DecisionClient):
             options = self.web.get("sites", {}).get(provider, {})
             if not isinstance(options, dict):
                 raise AIError(f"web.sites.{provider} must be an object.")
+            if self.engine(provider) not in ("lightpanda", "chromium"):
+                raise AIError(f"web.sites.{provider}.engine must be lightpanda or chromium.")
             if not isinstance(options.get("model_label", SITES[provider]["model_label"]), str):
                 raise AIError(f"web.sites.{provider}.model_label must be a string.")
+            if not isinstance(options.get("thinking_label", ""), str):
+                raise AIError(f"web.sites.{provider}.thinking_label must be a string.")
+            if type(options.get("keep_browser_open", False)) is not bool:
+                raise AIError(f"web.sites.{provider}.keep_browser_open must be true or false.")
             overrides = options.get("selectors", {})
             if (not isinstance(overrides, dict) or set(overrides) - set(SITES[provider]["selectors"])
                     or any(not isinstance(s, str) or not s.strip() for s in overrides.values())):
                 raise AIError(f"web.sites.{provider}.selectors contains an invalid selector override.")
-        executable = Path(self.web.get("executable_path", str(DEFAULT_BINARY))).expanduser()
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise AIError("Install Lightpanda: .venv/bin/python web_inference.py --install", "browser_install")
+        configured = [p for p in providers if self.adapter(p).model_label.strip()]
+        if any(self.engine(p) == "lightpanda" for p in configured):
+            executable = Path(self.web.get("executable_path", str(DEFAULT_BINARY))).expanduser()
+            if not executable.is_file() or not os.access(executable, os.X_OK):
+                raise AIError("Install Lightpanda: .venv/bin/python web_inference.py --install", "browser_install")
+        if any(self.engine(p) == "chromium" for p in configured):
+            executable = find_chromium(self.web.get("chromium_executable_path"))
+            if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
+                raise AIError("Configure an installed Chromium/Chrome browser for the web backend.", "browser_install")
         try:
             import websocket  # noqa: F401 -- optional for the API backend
         except ImportError:
@@ -362,29 +420,37 @@ class WebInferenceClient(DecisionClient):
 
     def _run(self, provider, deadline, operation):
         with self.session_lock(provider):
-            with Lightpanda(executable=self.web.get("executable_path"), deadline=deadline,
-                            stop_event=self.stop_event, cookies=self.cookie_file(provider)) as browser:
+            options = {"deadline": deadline, "stop_event": self.stop_event, "cookies": self.cookie_file(provider)}
+            runtime = (Chromium(executable=self.web.get("chromium_executable_path"),
+                                profile=self.login_profile(provider),
+                                state_file=self.native_state_file(provider),
+                                keep_open=self.adapter(provider).options.get("keep_browser_open", False),
+                                **(options | {"cookies": None}))
+                       if self.engine(provider) == "chromium" else
+                       Lightpanda(executable=self.web.get("executable_path"), **options))
+            with runtime as browser:
+                result = operation(self.adapter(provider), browser)
+                # A failed/anonymous page must not replace a working login export.
+                # Refresh cookies only after the operation succeeds, and never let
+                # cleanup failure mask a complete inference result.
                 try:
-                    return operation(self.adapter(provider), browser)
-                finally:
-                    # Preserve the previous cookie file if the deadline/cancel
-                    # prevents saving. Never let cleanup mask the inference error.
-                    try:
-                        browser.save_cookies(self.cookie_file(provider))
-                    except AIError:
-                        LOG.info("%s: kept previous session cookies", provider)
+                    browser.save_cookies(self.cookie_file(provider))
+                except AIError:
+                    LOG.info("%s: kept previous session cookies", provider)
+                return result
 
     def check(self, provider):
         self.validate_config()
         deadline = time.monotonic() + min(45, self.web.get("timeout_seconds", 240))
         state = self._run(provider, deadline, lambda adapter, page: adapter.prepare(page))
-        return {"status": "ready", "provider": provider, "engine": "lightpanda", "model": state["model"]}
+        return {"status": "ready", "provider": provider, "engine": self.engine(provider), "model": state["model"]}
 
     def analyze_screenshot(self, image_path, prompt=None, response_format=None):
         self.validate_config()
         image_path = Path(image_path).resolve()
         width, height = screenshot_size(image_path)
         deadline = time.monotonic() + self.web.get("timeout_seconds", 240)
+        attempted_errors = []
         for provider in self.web.get("providers", ["gemini"]):
             if self.stop_event is not None and self.stop_event.is_set():
                 raise AIError("Web inference cancelled.", "cancelled")
@@ -409,10 +475,11 @@ class WebInferenceClient(DecisionClient):
                 if error.code == "cancelled":
                     raise
                 self.last_attempts.append({"provider": provider, "error_code": error.code})
+                attempted_errors.append(error.code)
                 LOG.info("%s attempt stopped (%s)", provider, error.code)
         if time.monotonic() >= deadline:
             raise AIError("Web inference exhausted its total time budget.", "browser_timeout")
-        codes = {attempt["error_code"] for attempt in self.last_attempts}
+        codes = set(attempted_errors) or {attempt["error_code"] for attempt in self.last_attempts}
         code = next(iter(codes)) if len(codes) == 1 else "browser_unavailable"
         raise AIError("No configured web provider returned a complete, valid decision. Check local sign-in sessions, model labels, and page compatibility.", code)
 
@@ -421,9 +488,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--provider", choices=tuple(SITES), default="gemini")
+    parser.add_argument("--login-browser", type=Path, help="Installed Chromium/Chrome executable for the optional login helper")
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--install", action="store_true", help="Install the official checksum-verified Lightpanda binary")
     modes.add_argument("--import-cookies", type=Path, help="Import a local cookie export; never paste cookies into chat")
+    modes.add_argument("--login", action="store_true", help="Sign in interactively using an installed browser and transfer the session locally")
+    modes.add_argument("--close-browser", action="store_true", help="Close this provider's managed Chromium session normally")
     modes.add_argument("--check", action="store_true", help="Check session, model and empty chat without uploading")
     modes.add_argument("--image", type=Path, help="Upload a PNG and print a validated decision; never click the VM")
     args = parser.parse_args(argv)
@@ -434,7 +504,14 @@ def main(argv=None):
         else:
             config = load_config(args.config)
             client = WebInferenceClient(config)
-            if args.import_cookies:
+            if args.close_browser:
+                with client.session_lock(args.provider):
+                    close_managed_browser(client.native_state_file(args.provider), client.login_profile(args.provider))
+                result = {"status": "browser_closed", "provider": args.provider}
+            elif args.login:
+                from web_login import login
+                result = login(client, args.provider, executable=str(args.login_browser) if args.login_browser else None)
+            elif args.import_cookies:
                 result = client.import_cookies(args.provider, args.import_cookies)
             elif args.check:
                 result = client.check(args.provider)

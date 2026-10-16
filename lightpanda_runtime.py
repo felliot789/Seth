@@ -81,6 +81,8 @@ def write_private_json(path, value):
 
 
 class Lightpanda:
+    label = "Lightpanda"
+
     def __init__(self, *, executable=None, deadline, stop_event=None, cookies=None):
         self.executable = Path(executable or DEFAULT_BINARY).expanduser()
         self.deadline = deadline
@@ -96,7 +98,7 @@ class Lightpanda:
             raise AIError("Web inference cancelled; no further action will be attempted.", "cancelled")
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise AIError("Lightpanda cycle timed out; no click was attempted.", "browser_timeout")
+            raise AIError(f"{self.label} cycle timed out; no click was attempted.", "browser_timeout")
         return remaining
 
     def pause(self, seconds=0.15):
@@ -189,30 +191,30 @@ class Lightpanda:
                 except websocket.WebSocketTimeoutException:
                     continue
                 if not raw:
-                    raise AIError("Lightpanda's control connection closed.", "browser_closed")
+                    raise AIError(f"{self.label}'s control connection closed.", "browser_closed")
                 if len(raw) > 4 * 1024 * 1024:
-                    raise AIError("Lightpanda exceeded the control response limit.", "browser_error")
+                    raise AIError(f"{self.label} exceeded the control response limit.", "browser_error")
                 response = json.loads(raw)
                 if response.get("id") != self.counter:
                     continue
                 if response.get("error"):
-                    raise AIError(f"Lightpanda does not support this operation: {method}.", "browser_protocol")
+                    raise AIError(f"{self.label} does not support this operation: {method}.", "browser_protocol")
                 return response.get("result", {})
         except (OSError, websocket.WebSocketException, ValueError):
             self.remaining()
-            raise AIError("Lightpanda's control connection failed.", "browser_error") from None
+            raise AIError(f"{self.label}'s control connection failed.", "browser_error") from None
 
     def evaluate(self, expression):
         result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
         if result.get("exceptionDetails"):
-            raise AIError("Lightpanda could not execute a page operation; the website may use unsupported browser features.",
+            raise AIError(f"{self.label} could not execute a page operation; the website may use unsupported browser features.",
                           "browser_javascript")
         return result.get("result", {}).get("value")
 
     def navigate(self, url):
         result = self.call("Page.navigate", {"url": url})
         if result.get("errorText"):
-            raise AIError("Lightpanda could not load the provider page.", "browser_navigation")
+            raise AIError(f"{self.label} could not load the provider page.", "browser_navigation")
 
     def wait(self, predicate):
         while True:
@@ -232,5 +234,5 @@ class Lightpanda:
     def save_cookies(self, path):
         cookies = self.call("Network.getAllCookies").get("cookies")
         if not isinstance(cookies, list):
-            raise AIError("Lightpanda could not save its session cookies.", "browser_protocol")
+            raise AIError(f"{self.label} could not save its session cookies.", "browser_protocol")
         write_private_json(path, cookies)

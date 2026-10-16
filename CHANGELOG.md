@@ -1,5 +1,23 @@
 # Development milestones
 
+## 2026-10-15 — Native browser fallback and session persistence
+
+- Added an installed Chromium/Chrome engine using the existing direct CDP
+  controller, headless operation, dedicated profiles, deadlines, and cancellation.
+- Added a native sign-in helper that saves cookies immediately and closes through
+  the browser's normal shutdown path after model selection. Chromium inference
+  reuses the full profile instead of overwriting it with exported cookies.
+- Failed web operations preserve imported sessions. Cookie-refresh failures do
+  not mask a complete answer.
+- Added a persistent managed-browser mode that hands off the exact signed-in tab,
+  reconnects between questions, starts a fresh chat, and closes through an explicit
+  `--close-browser` command. This avoids repeated session transfer/restart during
+  normal use; a standby AI agent is unnecessary.
+- The same image-integrity, completion, failure, cookie, and cancellation fixtures
+  pass in both real browser engines. Three controlled Gemini screenshot questions
+  and a 1920 × 1080 VM dry cycle passed with Argon Medium. The web backend is now
+  selected for normal use. Its current Lightpanda initialization fails before upload.
+
 ## 2026-10-15 — Experimental Lightpanda web inference
 
 - Added a checksum-verified, private Lightpanda installation and a direct Python

@@ -10,12 +10,13 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image
 from ai_client import SethAIClient
+from chromium_runtime import Chromium, close_managed_browser, find_chromium
 from gemini_web import GeminiWebClient
 from inference import AIError, build_prompt, create_client
 from lightpanda_runtime import DEFAULT_BINARY, Lightpanda, write_private_json
@@ -55,6 +56,31 @@ class WebClientTests(unittest.TestCase):
                              ("providers", ["gemini", "gemini"]), ("providers", ["unknown"])):
             with self.subTest(field=field, value=value), self.assertRaises(AIError):
                 WebInferenceClient({"web": self.config["web"] | {field: value}}).validate_config()
+
+    def test_only_configured_engines_need_installed_binaries(self):
+        self.client.web["executable_path"] = "/nonexistent/lightpanda"
+        self.client.web["sites"] = {"gemini": {"engine": "chromium", "model_label": "Argon"}}
+        with patch("web_inference.find_chromium", return_value=sys.executable):
+            self.client.validate_config()
+        self.client.web["sites"]["gemini"]["engine"] = "unknown"
+        with self.assertRaises(AIError):
+            self.client.validate_config()
+
+    def test_gemini_preview_renaming_stays_bound_to_the_original_filename(self):
+        adapter = SiteAdapter("gemini")
+        for label in ("question.png", "Preview question_456f82.png close attachment"):
+            self.assertTrue(adapter.attachment_matches(label, self.image))
+        for label in ("other.png", "otherquestion.png", "question.png.extra", "question_wrong.png", "question_zzzzzz.png"):
+            self.assertFalse(adapter.attachment_matches(label, self.image))
+        self.assertFalse(SiteAdapter("chatgpt").attachment_matches("question_456f82.png", self.image))
+
+    def test_selected_model_and_thinking_level_must_both_match(self):
+        adapter = SiteAdapter("gemini", {"model_label": "Argon", "thinking_label": "Medium"})
+        adapter.verify_model({"modelCount": 1, "model": "ArgonMedium Open mode picker, currently Argon Medium"})
+        for model in ("Argon High", "Flash Medium", "Argon MediumPlus"):
+            with self.subTest(model=model), self.assertRaises(AIError) as caught:
+                adapter.verify_model({"modelCount": 1, "model": model})
+            self.assertEqual(caught.exception.code, "browser_model")
 
     def test_fallback_is_ordered_and_each_provider_is_attempted_once(self):
         calls, deadlines = [], []
@@ -104,6 +130,15 @@ class WebClientTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], "chatgpt")
         self.assertEqual(self.client.last_attempts, [{"provider": "gemini", "error_code": "browser_model"}])
 
+    def test_unconfigured_fallbacks_do_not_hide_an_actionable_login_failure(self):
+        for provider in ("chatgpt", "qwen"):
+            self.client.web["sites"][provider]["model_label"] = ""
+        with patch.object(self.client, "_run", side_effect=AIError("Sign in", "browser_login")) as run:
+            with self.assertRaises(AIError) as caught:
+                self.client.analyze_screenshot(self.image)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(caught.exception.code, "browser_login")
+
     def test_cookie_import_filters_domains_and_keeps_private_files(self):
         source = self.root / "export.json"
         source.write_text(json.dumps({"cookies": [
@@ -138,8 +173,32 @@ class WebClientTests(unittest.TestCase):
         self.assertNotIn("sensitive-value", str(caught.exception))
         self.assertEqual(before, destination.read_bytes())
 
+    def test_failed_page_preserves_imported_session(self):
+        destination = self.client.cookie_file("gemini")
+        write_private_json(destination, [{"name": "SID", "value": "local-test-session"}])
+        before = destination.read_bytes()
+        page = MagicMock()
+        page.save_cookies.side_effect = lambda path: write_private_json(path, [])
+        operation = MagicMock(side_effect=AIError("Signed out", "browser_login"))
+        with patch("web_inference.Lightpanda") as runtime:
+            runtime.return_value.__enter__.return_value = page
+            with self.assertRaises(AIError):
+                self.client._run("gemini", time.monotonic() + 10, operation)
+        page.save_cookies.assert_not_called()
+        self.assertEqual(destination.read_bytes(), before)
+
+    def test_successful_operation_survives_cookie_refresh_failure(self):
+        page = MagicMock()
+        page.save_cookies.side_effect = AIError("Deadline", "browser_timeout")
+        with patch("web_inference.Lightpanda") as runtime:
+            runtime.return_value.__enter__.return_value = page
+            self.assertEqual(self.client._run("gemini", time.monotonic() + 10,
+                                             lambda adapter, browser: "complete answer"), "complete answer")
+        page.save_cookies.assert_called_once_with(self.client.cookie_file("gemini"))
+
 
 FIXTURE = r'''<!doctype html><html><body>
+<button id=new-chat>New chat</button>
 <button id=model>Pro</button>
 <div id=editor contenteditable=true role=textbox></div>
 <input type=file id=file>
@@ -149,6 +208,11 @@ const scenario=SCENARIO;
 const answer=JSON.stringify({action:'click',coordinate_space:'normalized_1000',
  click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
 window.submissions=0;
+document.querySelector('#new-chat').onclick=()=>{
+ document.querySelectorAll('.user,.response,.attachment,#stop').forEach(e=>e.remove());
+ document.querySelector('#editor').textContent='';document.querySelector('#send').disabled=true;
+ window.completed=false;
+};
 if(scenario==='login')document.body.insertAdjacentHTML('beforeend','<button>Sign in</button>');
 if(scenario==='wrong_model')document.querySelector('#model').textContent='Fast';
 if(scenario==='stale')document.body.insertAdjacentHTML('beforeend','<div class=response>Old answer</div>');
@@ -156,6 +220,11 @@ document.querySelector('#file').onchange=async()=>{
  const file=document.querySelector('#file').files[0];
  const preview=document.createElement('div');preview.className='attachment';
  preview.textContent=scenario==='wrong_file'?'other.png':file.name;
+ if(scenario==='suffix'){
+   preview.textContent='';preview.setAttribute('aria-describedby','preview-description');
+   const description=document.createElement('span');description.id='preview-description';description.hidden=true;
+   description.textContent=file.name.replace('.png','_456f82.png');document.body.append(description);
+ }
  preview.insertAdjacentHTML('beforeend','<span class=uploading>Uploading</span>');
  document.body.append(preview);
  const result=await fetch('/upload',{method:'POST',body:file});
@@ -191,6 +260,15 @@ document.querySelector('#send').onclick=()=>{
    window.completed=true;stop.remove();
  },250);
 };
+if(scenario==='menu'){
+ const original=document.querySelector('#file'),handler=original.onchange;
+ original.id='document-file';original.accept='.pdf';
+ const upload=document.createElement('button');upload.id='upload';upload.textContent='Upload';document.body.append(upload);
+ upload.onclick=()=>setTimeout(()=>{
+   const image=document.createElement('input');image.type='file';image.id='file';image.accept='image/*';
+   image.onchange=handler;document.body.append(image);
+ },100);
+}
 </script></body></html>'''
 
 TEST_SELECTORS = {
@@ -198,6 +276,7 @@ TEST_SELECTORS = {
     "upload_item": "#upload-item", "attachment": ".attachment", "upload_busy": ".uploading",
     "send": "#send", "user": ".user", "response": ".response", "answer": ".markdown",
     "complete": ".copy", "stop": "#stop", "error": '[role="alert"]',
+    "new_chat": "#new-chat",
 }
 
 
@@ -245,12 +324,13 @@ class LightpandaIntegrationTests(unittest.TestCase):
                           deadline=time.monotonic() + timeout, stop_event=self.stop, cookies=cookies)
 
     def adapter(self, scenario="normal"):
-        adapter = SiteAdapter("gemini", {"selectors": TEST_SELECTORS})
+        selectors = TEST_SELECTORS | ({"file": 'input[type="file"][accept*="image"]'} if scenario == "menu" else {})
+        adapter = SiteAdapter("gemini", {"selectors": selectors})
         adapter.site = adapter.site | {"url": f"http://127.0.0.1:{self.server.server_port}/{scenario}"}
         return adapter
 
     def test_real_png_upload_and_completed_answer(self):
-        for scenario in ("normal", "code"):
+        for scenario in ("normal", "code", "suffix", "menu"):
             with self.subTest(scenario=scenario), self.browser() as page:
                 before = len(self.uploads)
                 raw = self.adapter(scenario).exchange(page, self.image, build_prompt(320, 200), lambda label: None)
@@ -318,6 +398,39 @@ class LightpandaIntegrationTests(unittest.TestCase):
                     timer.cancel()
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertIsNone(runtime.process)
+
+
+@unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1", "Set SETH_CHROMIUM_TESTS=1 for offline Chromium integration")
+class ChromiumIntegrationTests(LightpandaIntegrationTests):
+    __unittest_skip__ = os.environ.get("SETH_CHROMIUM_TESTS") != "1"
+
+    def browser(self, timeout=8, cookies=None):
+        return Chromium(executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),
+                        profile=self.root / "profile", deadline=time.monotonic() + timeout,
+                        stop_event=self.stop, cookies=cookies)
+
+    def test_live_session_reconnects_for_two_isolated_image_questions(self):
+        state = self.root / "browser.json"
+        profile = self.root / "persistent-profile"
+        def runtime():
+            return Chromium(profile=profile, state_file=state, keep_open=True,
+                            deadline=time.monotonic() + 10)
+        try:
+            with runtime() as page:
+                self.adapter().exchange(page, self.image, "First question", lambda label: None)
+                page.evaluate("window.liveSessionProof = 'must-survive-without-reload'")
+                pid = json.loads(state.read_text())["pid"]
+            with runtime() as page:
+                self.assertTrue(page.reuse_page)
+                self.assertEqual(page.evaluate("window.liveSessionProof"), 'must-survive-without-reload')
+                raw = self.adapter().exchange(page, self.image, "Second question", lambda label: None)
+                self.assertEqual(page.evaluate("window.submissions"), 2)
+                self.assertEqual(json.loads(state.read_text())["pid"], pid)
+                self.assertNotIn("First question", self.adapter().snapshot(page)["users"][0])
+                self.assertEqual(WebInferenceClient({}).parse_coordinates(raw, 320, 200)["click_x"], 160)
+            self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        finally:
+            close_managed_browser(state, profile)
 
 
 if __name__ == "__main__":
