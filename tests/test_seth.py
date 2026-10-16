@@ -449,6 +449,27 @@ class LocalAPI:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_unresolvable_gateway_is_reported_without_retry_or_click(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "test.png"
+            Image.new("RGB", (320, 200)).save(path)
+            for streaming in (False, True):
+                with self.subTest(streaming=streaming), LocalAPI(status=530, content={"origin": "private-origin"}) as api:
+                    config = configuration(root)
+                    config["api"].update(base_url=api.url, stream=streaming)
+                    engine = SethEngine(config, execute=True)
+                    frame = Frame(path, GuestDisplay(**TEST_DISPLAY), time.monotonic())
+                    with patch.object(engine.capture, "capture_frame", return_value=frame), \
+                            patch.object(engine.clicker, "click") as click:
+                        result = engine.run_cycle()
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["error_code"], "gateway_unavailable")
+                    self.assertIn("INFERENCE_BASE_URL", result["error"])
+                    self.assertNotIn("private-origin", result["error"])
+                    self.assertEqual(engine.progress, ("error", "API offline"))
+                    self.assertEqual(len(api.requests), 1)
+                    click.assert_not_called()
+
     def test_streamed_decision_is_assembled_only_after_a_successful_finish(self):
         def event(data):
             return "data: " + json.dumps(data) + "\n\n"

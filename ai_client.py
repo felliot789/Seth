@@ -93,6 +93,9 @@ class SethAIClient(DecisionClient):
             if response.status_code == 524:
                 raise AIError("Inference tunnel timed out waiting for the upstream answer (HTTP 524); no click was attempted.",
                               "response_timeout")
+            if response.status_code == 530:
+                raise AIError("Inference gateway cannot resolve its origin (HTTP 530). Restart the provider tunnel or update INFERENCE_BASE_URL; no click was attempted.",
+                              "gateway_unavailable")
             if response.status_code != 200:
                 raise AIError(f"Inference returned HTTP {response.status_code}; no click was attempted.")
             if payload["stream"]:

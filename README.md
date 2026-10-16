@@ -82,6 +82,13 @@ accepts images. Environment variables override `.env`; legacy `SETH_API_*` and
 Keys are never written into `config.json`. `.env` and captures are ignored by Git.
 A normal cycle sends the screenshot to your configured inference provider.
 
+If the overlay reports **API offline** and the log shows HTTP 530, the inference
+gateway cannot resolve its upstream origin. Restart the provider's tunnel on the
+machine hosting inference, or replace `INFERENCE_BASE_URL` with its current URL
+and restart `seth-listener`. A screenshot, model, or API-key change does not fix
+that origin DNS failure. Seth makes no automatic retry and sends no clicks for
+this error. See [Cloudflare's HTTP 530 documentation](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-530/).
+
 Requests use the image format in the official
 [Chat Completions API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 Set `api.response_format` to `"json_object"` if the provider supports JSON mode,

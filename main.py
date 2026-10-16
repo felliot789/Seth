@@ -110,6 +110,8 @@ class SethEngine:
                      "low_confidence": "Uncertain", "cancelled": "Cancelled", "error": "Error"}.get(status, status)
             if result.get("error_code") in ("response_timeout", "connect_timeout"):
                 label = "API timeout"
+            if result.get("error_code") == "gateway_unavailable":
+                label = "API offline"
             if result.get("error_code", "").startswith("browser_"):
                 label = {"browser_timeout": "Web timeout", "browser_login": "Web sign-in",
                          "browser_limit": "Web limit", "browser_busy": "Browser busy",
