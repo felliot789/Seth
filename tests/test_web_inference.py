@@ -213,6 +213,19 @@ document.querySelector('#new-chat').onclick=()=>{
  document.querySelector('#editor').textContent='';document.querySelector('#send').disabled=true;
  window.completed=false;
 };
+if(scenario==='sidebar'||scenario==='ambiguous_new_chat'){
+ const original=document.querySelector('#new-chat'),reset=original.onclick;
+ window.brandClicks=0;window.newChatClicks=0;
+ const brand=document.createElement('a');brand.href='/';brand.setAttribute('aria-label','New chat');
+ brand.textContent='Gemini';brand.onclick=e=>{e.preventDefault();window.brandClicks++;};
+ original.before(brand);
+ const chat=document.createElement('a');chat.href='/app';chat.setAttribute('aria-label','New chat');
+ chat.textContent='New chat';chat.onclick=e=>{e.preventDefault();window.newChatClicks++;reset();};
+ original.replaceWith(chat);
+ if(scenario==='ambiguous_new_chat'){
+   const duplicate=chat.cloneNode(true);duplicate.onclick=chat.onclick;chat.after(duplicate);
+ }
+}
 if(scenario==='login')document.body.insertAdjacentHTML('beforeend','<button>Sign in</button>');
 if(scenario==='wrong_model')document.querySelector('#model').textContent='Fast';
 if(scenario==='stale')document.body.insertAdjacentHTML('beforeend','<div class=response>Old answer</div>');
@@ -260,13 +273,16 @@ document.querySelector('#send').onclick=()=>{
    window.completed=true;stop.remove();
  },250);
 };
-if(scenario==='menu'){
+if(scenario==='menu'||scenario==='raf_menu'){
  const original=document.querySelector('#file'),handler=original.onchange;
  original.id='document-file';original.accept='.pdf';
  const upload=document.createElement('button');upload.id='upload';upload.textContent='Upload';document.body.append(upload);
- upload.onclick=()=>setTimeout(()=>{
+ const createImageInput=()=>{
    const image=document.createElement('input');image.type='file';image.id='file';image.accept='image/*';
    image.onchange=handler;document.body.append(image);
+ };
+ upload.onclick=()=>setTimeout(()=>{
+   if(scenario==='raf_menu')requestAnimationFrame(createImageInput);else createImageInput();
  },100);
 }
 </script></body></html>'''
@@ -324,7 +340,9 @@ class LightpandaIntegrationTests(unittest.TestCase):
                           deadline=time.monotonic() + timeout, stop_event=self.stop, cookies=cookies)
 
     def adapter(self, scenario="normal"):
-        selectors = TEST_SELECTORS | ({"file": 'input[type="file"][accept*="image"]'} if scenario == "menu" else {})
+        selectors = TEST_SELECTORS | ({"file": 'input[type="file"][accept*="image"]'} if scenario in ("menu", "raf_menu") else {})
+        if scenario in ("sidebar", "ambiguous_new_chat"):
+            selectors["new_chat"] = SITES["gemini"]["selectors"]["new_chat"]
         adapter = SiteAdapter("gemini", {"selectors": selectors})
         adapter.site = adapter.site | {"url": f"http://127.0.0.1:{self.server.server_port}/{scenario}"}
         return adapter
@@ -351,9 +369,25 @@ class LightpandaIntegrationTests(unittest.TestCase):
                 self.assertEqual(page.evaluate("window.submissions"), 0)
                 self.assertEqual(len(self.uploads), before)
 
+    def test_ambiguous_new_conversation_controls_fail_before_another_upload(self):
+        adapter = self.adapter("ambiguous_new_chat")
+        with self.browser() as page:
+            adapter.exchange(page, self.image, "First question", lambda label: None)
+            before = len(self.uploads)
+            page.reuse_page = True
+            with self.assertRaises(AIError) as caught:
+                adapter.exchange(page, self.image, "Second question", lambda label: None)
+            self.assertEqual(caught.exception.code, "browser_layout")
+            self.assertEqual(len(self.uploads), before)
+            self.assertEqual(page.evaluate("window.submissions"), 1)
+            self.assertEqual(page.evaluate("window.brandClicks"), 0)
+            self.assertEqual(page.evaluate("window.newChatClicks"), 0)
+
     def test_failed_and_stalled_uploads_never_submit(self):
         for scenario, code in (("upload_error", "browser_error"), ("stuck_upload", "browser_timeout"), ("wrong_file", "browser_timeout")):
-            with self.subTest(scenario=scenario), self.browser(timeout=1.5) as page:
+            with self.subTest(scenario=scenario), self.browser() as page:
+                # Bound the exchange independently of cold browser startup.
+                page.deadline = time.monotonic() + 1.5
                 with self.assertRaises(AIError) as caught:
                     self.adapter(scenario).exchange(page, self.image, "prompt", lambda label: None)
                 self.assertEqual(caught.exception.code, code)
@@ -361,7 +395,8 @@ class LightpandaIntegrationTests(unittest.TestCase):
 
     def test_incomplete_response_never_returns_even_when_json_is_valid(self):
         for scenario in ("generating", "interrupted"):
-            with self.subTest(scenario=scenario), self.browser(timeout=1.5) as page:
+            with self.subTest(scenario=scenario), self.browser() as page:
+                page.deadline = time.monotonic() + 1.5
                 with self.assertRaises(AIError) as caught:
                     self.adapter(scenario).exchange(page, self.image, "prompt", lambda label: None)
                 self.assertEqual(caught.exception.code, "browser_timeout")
@@ -409,28 +444,68 @@ class ChromiumIntegrationTests(LightpandaIntegrationTests):
                         profile=self.root / "profile", deadline=time.monotonic() + timeout,
                         stop_event=self.stop, cookies=cookies)
 
-    def test_live_session_reconnects_for_two_isolated_image_questions(self):
-        state = self.root / "browser.json"
-        profile = self.root / "persistent-profile"
+    def test_reconnected_background_chat_renders_upload_menu_without_activating_its_tab(self):
+        state = self.root / "background-browser.json"
+        profile = self.root / "background-profile"
+        adapter = self.adapter("raf_menu")
         def runtime():
             return Chromium(profile=profile, state_file=state, keep_open=True,
+                            headless=os.environ.get("SETH_CHROMIUM_HEADED_TESTS") != "1",
                             deadline=time.monotonic() + 10)
         try:
             with runtime() as page:
-                self.adapter().exchange(page, self.image, "First question", lambda label: None)
-                page.evaluate("window.liveSessionProof = 'must-survive-without-reload'")
-                pid = json.loads(state.read_text())["pid"]
+                page.navigate(adapter.site["url"])
+                page.call("Emulation.setFocusEmulationEnabled", {"enabled": False})
+                foreground = page.call("Target.createTarget", {
+                    "url": "data:text/html,<title>Foreground fixture</title>",
+                    "background": False})["targetId"]
+                page.wait(lambda: page.evaluate("document.hidden"))
+                page.evaluate("window.animationProbe=0;requestAnimationFrame(()=>window.animationProbe++)")
+                time.sleep(0.2)
+                self.assertEqual(page.evaluate("window.animationProbe"), 0)
             with runtime() as page:
                 self.assertTrue(page.reuse_page)
-                self.assertEqual(page.evaluate("window.liveSessionProof"), 'must-survive-without-reload')
-                raw = self.adapter().exchange(page, self.image, "Second question", lambda label: None)
-                self.assertEqual(page.evaluate("window.submissions"), 2)
-                self.assertEqual(json.loads(state.read_text())["pid"], pid)
-                self.assertNotIn("First question", self.adapter().snapshot(page)["users"][0])
+                before = len(self.uploads)
+                raw = adapter.exchange(page, self.image, "Background question", lambda label: None)
+                self.assertEqual(page.evaluate("window.animationProbe"), 1)
+                self.assertEqual(len(self.uploads), before + 1)
+                self.assertEqual(page.evaluate("window.submissions"), 1)
                 self.assertEqual(WebInferenceClient({}).parse_coordinates(raw, 320, 200)["click_x"], 160)
-            self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+                # Rendering the original tab must not activate it over the user's tab.
+                page.session = page.call("Target.attachToTarget", {
+                    "targetId": foreground, "flatten": True})["sessionId"]
+                self.assertTrue(page.evaluate("!document.hidden && document.hasFocus()"))
         finally:
             close_managed_browser(state, profile)
+
+    def test_live_session_reconnects_for_two_isolated_image_questions(self):
+        for scenario in ("normal", "sidebar"):
+            with self.subTest(scenario=scenario):
+                state = self.root / f"{scenario}-browser.json"
+                profile = self.root / f"{scenario}-persistent-profile"
+                adapter = self.adapter(scenario)
+                def runtime():
+                    return Chromium(profile=profile, state_file=state, keep_open=True,
+                                    deadline=time.monotonic() + 10)
+                try:
+                    with runtime() as page:
+                        adapter.exchange(page, self.image, "First question", lambda label: None)
+                        page.evaluate("window.liveSessionProof = 'must-survive-without-reload'")
+                        pid = json.loads(state.read_text())["pid"]
+                    with runtime() as page:
+                        self.assertTrue(page.reuse_page)
+                        self.assertEqual(page.evaluate("window.liveSessionProof"), 'must-survive-without-reload')
+                        raw = adapter.exchange(page, self.image, "Second question", lambda label: None)
+                        self.assertEqual(page.evaluate("window.submissions"), 2)
+                        self.assertEqual(json.loads(state.read_text())["pid"], pid)
+                        self.assertNotIn("First question", adapter.snapshot(page)["users"][0])
+                        self.assertEqual(WebInferenceClient({}).parse_coordinates(raw, 320, 200)["click_x"], 160)
+                        if scenario == "sidebar":
+                            self.assertEqual(page.evaluate("window.brandClicks"), 0)
+                            self.assertEqual(page.evaluate("window.newChatClicks"), 1)
+                    self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+                finally:
+                    close_managed_browser(state, profile)
 
 
 if __name__ == "__main__":

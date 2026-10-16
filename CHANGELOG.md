@@ -1,5 +1,18 @@
 # Development milestones
 
+## 2026-10-15 — Persistent browser interaction fixes
+
+- Disambiguated Gemini's New chat control from the similarly labeled logo link
+  shown in the expanded sidebar.
+- Kept persistent Chromium tabs rendering through CDP focus emulation, allowing
+  animation-dependent upload controls to work while the window is minimized
+  without restoring it or taking desktop focus.
+- Verified an explicitly requested full listener cycle with Gemini minimized:
+  screenshot capture, upload, completed answer, and the correct VM radio selection
+  in 38.5 seconds; a follow-up capture confirmed the selected control.
+- All 105 tests pass, including background rendering, expanded-sidebar chat reset,
+  and upload/response timeout regressions with browser startup timed separately.
+
 ## 2026-10-15 — Native browser fallback and session persistence
 
 - Added an installed Chromium/Chrome engine using the existing direct CDP

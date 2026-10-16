@@ -102,24 +102,41 @@ upload/submission and after completion.
 - The controller required a completed reply and passed the shared JSON,
   coordinate, and confidence checks. Failed setup probes stopped before prompt
   submission. No standby inference agent participated.
+- An explicitly requested full listener cycle captured a fresh 1920 × 1080 VM
+  screenshot, uploaded it with the Chromium window minimized, read the completed
+  reply, and clicked the intended radio control at (394, 680) in 38.5 seconds.
+  A follow-up capture visually confirmed the third answer was selected.
+- This full cycle exposed and fixed two persistent-window issues: the expanded
+  sidebar also labels its logo link "New chat", and minimized Chromium suspends
+  animation frames needed by the upload UI. The adapter targets the `/app` link;
+  persistent CDP connections enable focus emulation to keep rendering without
+  restoring the native window or taking desktop focus.
 - Synthetic validation images, expected bounds, response records, browser state,
   and cookies remain local and outside Git.
+
+Validation after the interaction fixes: all 105 tests pass with the Lightpanda,
+Chromium, and native-login integration suites enabled. A separate headed Chromium
+test under Xvfb also verifies background animation, upload, and reply retrieval
+without activating the chat tab over the foreground tab.
 
 ChatGPT and Qwen model labels and signed-in selectors still need configuration.
 
 ## Remaining acceptance checks
 
-1. Browser restart and long-term session renewal remain unverified. Keep the
-   dedicated native browser open (minimizing is fine); use `--login` if it closes
-   or Gemini requests authentication again. The live session is the validated path.
+1. Browser restart does not reliably restore authentication: after the next desktop
+   session, reopening the profile again required Google sign-in. Keep the dedicated
+   native browser open (minimizing is fine); use `--login` if it closes or Gemini
+   requests authentication again. Long-term session renewal remains unverified.
+   The live session is the validated path.
 2. Check the site's upload preprocessing in Lightpanda if its initialization
    compatibility is fixed. Lightpanda can pass file bytes but does
    not decode images, so a site requiring browser image dimensions or canvas
    resizing may fail before submission.
 3. Verify ChatGPT and Qwen independently, including their signed-in DOM selectors
    and completion signals, before adding them as operational fallbacks.
-4. A live VM dry cycle has passed. Actual guest selection remains user-triggered
-   through the existing shortcut; no automatic execution test was performed here.
+4. A live VM dry cycle and an explicitly requested full listener execution have
+   passed. Continue using the existing shortcut for each new question; broader
+   question formats and long-running sessions still need real-world validation.
 
 Source references: [Lightpanda file-input implementation](https://github.com/lightpanda-io/browser/pull/2635)
 and [cookie/image-loading options](https://lightpanda.io/docs/reference/cli/common-options).

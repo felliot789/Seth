@@ -93,6 +93,7 @@ class Chromium(Lightpanda):
             self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
             self.call("Page.enable")
             self.call("Runtime.enable")
+            self._keep_page_active()
             if self.keep_open and self.state_file:
                 write_private_json(self.state_file, {"pid": self.process.pid, "port": port,
                     "profile": str(self.profile), "target_id": target})
@@ -123,6 +124,14 @@ class Chromium(Lightpanda):
         self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         self.call("Page.enable")
         self.call("Runtime.enable")
+        self._keep_page_active()
+
+    def _keep_page_active(self):
+        if self.keep_open:
+            # A minimized/occluded native window suspends animation frames that
+            # chat upload menus and image preprocessing need. This keeps the tab
+            # rendering without restoring the window or taking desktop focus.
+            self.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
 
     def close(self):
         if self.keep_open and self.ws is not None:

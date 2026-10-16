@@ -40,7 +40,9 @@ SITES = {
             "complete": 'button[aria-label="Copy"], button[aria-label="Copy response"]',
             "stop": 'button[aria-label="Stop response"], button[aria-label="Stop generating"]',
             "error": '[role="alert"], .error-message',
-            "new_chat": 'a[aria-label="New chat"], button[aria-label="New chat"]',
+            # Expanded navigation also labels the Gemini home/logo link "New chat".
+            # Use the chat route so that link cannot make this control ambiguous.
+            "new_chat": 'a[aria-label="New chat"][href="/app"], button[aria-label="New chat"]',
         },
     },
     # These adapters are available for account-specific configuration and testing.
