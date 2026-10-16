@@ -1,5 +1,19 @@
 # Development milestones
 
+## 2026-10-16 — MCMA confirmation and answer diagnostics
+
+- The user confirmed working live Gemini inference for single-choice, table
+  classification, and multiple-choice multiple-answer (MCMA) questions.
+  The listener log confirms a completed MCMA plan with two separate checkbox clicks.
+- Expanded the shared MCMA instructions with a complete response object,
+  English/Indonesian question cues, and handling for partially answered questions
+  and unlabeled options. Existing multi-selection execution remains in use.
+- Preserved the model's explanation when it returns no action, exposing the reason
+  in cycle results and logs. Missing or invalid explanations are omitted; later
+  responses cannot reuse an earlier reason.
+- All 108 tests pass with Lightpanda, Chromium, and native-login integration
+  enabled, including no-action diagnostics and existing multi-selection execution.
+
 ## 2026-10-15 — Persistent browser interaction fixes
 
 - Disambiguated Gemini's New chat control from the similarly labeled logo link

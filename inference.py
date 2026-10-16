@@ -24,8 +24,10 @@ def screenshot_size(image_path):
 def build_prompt(width, height):
     return (
         f"Analyze this {width} by {height} screenshot. Answer the currently visible "
-        "question when its required selections are unambiguous. For a single-choice "
-        "question return a single JSON object: "
+        "question when its required selections are unambiguous. First identify "
+        "whether it requires one answer, multiple answers (MCMA), or one category "
+        "per table row, using both the instructions and answer controls. "
+        "For a single-choice radio question return a single JSON object: "
         '{"action":"click","coordinate_space":"normalized_1000",'
         '"click_x":integer,"click_y":integer,'
         '"confidence":number,"explanation":string}. '
@@ -35,10 +37,20 @@ def build_prompt(width, height):
         '{"row":1,"choice":"column label","click_x":integer,"click_y":integer}],'
         '"confidence":number,"explanation":string}. '
         "Include one selection for EACH unanswered row, numbered from 1 at the top. "
-        "For a multiple-answer checkbox question, use action select with "
-        '"selection_type":"multiple_answer" and selections of the form '
-        '{"option":"option label","click_x":integer,"click_y":integer}. '
-        "Include ALL correct unchecked options, not just the first one. "
+        "For MCMA (multiple choice multiple answers), multiple-response, or "
+        "select-all-that-apply questions, including instructions such as "
+        "'jawaban benar lebih dari satu' or 'pilih semua jawaban yang benar', "
+        "evaluate EVERY option independently and return this complete JSON object: "
+        '{"action":"select","selection_type":"multiple_answer",'
+        '"coordinate_space":"normalized_1000","selections":['
+        '{"option":"option label","click_x":integer,"click_y":integer}],'
+        '"confidence":number,"explanation":string}. '
+        "Include ALL correct unchecked options, not just the first one; use this "
+        "multiple_answer format even when only one correct option remains unchecked. "
+        "Use each option's visible label, or its text if there are no letter labels. "
+        "A checked box or selected control is already answered; leave it selected. "
+        "A single radio option containing a combination of statements is still "
+        "one single-choice answer, not several separate checkboxes. "
         "Use at most 10 selections for this one question. Skip already selected "
         "answers; if existing selections are incorrect or any required answer is "
         "uncertain, return action none. Use the lowest confidence across the plan. "
@@ -58,6 +70,9 @@ def build_prompt(width, height):
 
 class DecisionClient:
     def parse_coordinates(self, response_text, width, height):
+        # Keep the no-action return contract while making an abstention
+        # explainable to callers. A new parse must never reuse an old reason.
+        self.last_no_action_explanation = None
         # Some compatible gateways treat JSON mode as a prompt and still fence
         # the result. Accept one complete outer fence, never extract fragments.
         if isinstance(response_text, str):
@@ -72,6 +87,9 @@ class DecisionClient:
         if not isinstance(result, dict) or result.get("action") not in ("click", "select", "none"):
             raise AIError("Decision must specify action 'click', 'select', or 'none'.")
         if result["action"] == "none":
+            explanation = result.get("explanation")
+            if isinstance(explanation, str):
+                self.last_no_action_explanation = explanation.strip() or None
             return None
         if type(width) is not int or type(height) is not int or min(width, height) <= 0:
             raise AIError("Screenshot dimensions must be positive integer pixels.")

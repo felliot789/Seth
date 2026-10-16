@@ -233,7 +233,9 @@ Run one dry cycle, then exit:
 A dry cycle captures and calls inference without clicking. Add `--execute` to
 allow the current question's answer selections, with a maximum of ten clicks.
 Single-choice questions use one click; classification tables use one per
-unanswered row; checkbox questions select all correct unmarked options.
+unanswered row; multiple-choice multiple-answer (MCMA) checkbox questions select
+all correct unmarked options. Existing selections are preserved. If the model
+abstains, its explanation appears in the cycle result and listener log.
 `--mode manual` and `--mode test` are aliases
 for one cycle. They do not start a listener. There is no repeat/auto-next mode.
 

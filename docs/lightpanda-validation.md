@@ -121,6 +121,14 @@ without activating the chat tab over the foreground tab.
 
 ChatGPT and Qwen model labels and signed-in selectors still need configuration.
 
+On 2026-10-16, the user also confirmed live operation for single-choice, table
+classification, and MCMA questions. The listener log independently records an
+MCMA `multiple_answer` plan completing both of its two selections. MCMA uses the shared validated
+multi-selection path. Its prompt now supplies a complete JSON shape and explicit
+question cues; no-action explanations are retained to make future failures easier
+to diagnose. This user confirmation is separate from the controlled screenshot
+and full-cycle measurements above.
+
 ## Remaining acceptance checks
 
 1. Browser restart does not reliably restore authentication: after the next desktop

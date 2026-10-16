@@ -76,6 +76,9 @@ class SethEngine:
                 result = {"status": "cancelled"}
             elif decision is None:
                 result = {"status": "no_action"}
+                explanation = getattr(self.ai, "last_no_action_explanation", None)
+                if explanation:
+                    result["explanation"] = explanation
             elif decision["confidence"] < self.config.get("min_confidence", 0.85):
                 result = {"status": "low_confidence", "decision": decision}
             elif not self.execute:

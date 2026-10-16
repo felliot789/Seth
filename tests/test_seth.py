@@ -71,6 +71,30 @@ class DecisionTests(unittest.TestCase):
     def test_no_action(self):
         self.assertIsNone(self.client.parse_coordinates('{"action":"none"}', 320, 200))
 
+    def test_no_action_explanation_is_optional_and_never_reused(self):
+        reason = "The computed answer does not match any listed option."
+        for fields in ({}, {"explanation": None}, {"explanation": []},
+                       {"explanation": 7}, {"explanation": "   "}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(self.client.parse_coordinates(json.dumps(
+                    {"action": "none", "explanation": reason}), 320, 200))
+                self.assertEqual(self.client.last_no_action_explanation, reason)
+                self.assertIsNone(self.client.parse_coordinates(json.dumps(
+                    {"action": "none"} | fields), 320, 200))
+                self.assertIsNone(self.client.last_no_action_explanation)
+
+    def test_selection_and_invalid_response_clear_previous_abstention_reason(self):
+        for raw in (json.dumps(DECISION), "not JSON"):
+            with self.subTest(raw=raw):
+                self.client.parse_coordinates(
+                    '{"action":"none","explanation":"Earlier question was ambiguous."}', 320, 200)
+                if raw == "not JSON":
+                    with self.assertRaises(AIError):
+                        self.client.parse_coordinates(raw, 320, 200)
+                else:
+                    self.client.parse_coordinates(raw, 320, 200)
+                self.assertIsNone(self.client.last_no_action_explanation)
+
     def test_strict_invalid_decisions(self):
         invalid = ["x:150 y:100", "```json\n{}\n```", "[]", "null", "{}"]
         for changes in ({"click_x": -1}, {"click_x": 320}, {"click_y": 200},
@@ -206,6 +230,23 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(self.engine.run_cycle()["status"], expected)
                 self.assertEqual(self.engine.progress[0], expected)
                 self.click.assert_not_called()
+
+    def test_no_action_result_and_log_include_only_current_valid_explanation(self):
+        reason = "The computed answer does not match any listed option."
+        for fields in ({}, {"explanation": None}, {"explanation": []}):
+            with self.subTest(fields=fields):
+                self.analyze.return_value = json.dumps({"action": "none", "explanation": reason})
+                with self.assertLogs("seth", level="INFO") as messages:
+                    result = self.engine.run_cycle()
+                self.assertEqual(result, {"status": "no_action", "explanation": reason})
+                self.assertIn(json.dumps(result), messages.output[-1])
+                self.analyze.return_value = json.dumps({"action": "none"} | fields)
+                with self.assertLogs("seth", level="INFO") as messages:
+                    result = self.engine.run_cycle()
+                self.assertEqual(result, {"status": "no_action"})
+                self.assertNotIn(reason, messages.output[-1])
+                self.click.assert_not_called()
+                self.verify.assert_not_called()
 
     def test_dry_run_never_clicks(self):
         self.engine.execute = False
