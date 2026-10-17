@@ -186,12 +186,13 @@ class ScrollNavigator:
         delta = shift - self.offsets[key]
         return [left, top + delta, right, bottom + delta]
 
-    def _selected_boxes(self):
+    def _selected_boxes(self, shifts=None, identifiers=None):
         result = {}
-        for identifier in self.selected:
+        shifts = self.shifts if shifts is None else shifts
+        for identifier in self.selected if identifiers is None else identifiers:
             panel = self.records[identifier]['panel']
             key = self.active.get(panel, 'live')
-            box = self._box_in_view(identifier, key, self.shifts.get(panel, 0))
+            box = self._box_in_view(identifier, key, shifts.get(panel, 0))
             if box is not None:
                 region = content_box(self.views[key]) if key != 'live' else (0, 0, self.current.display.width, self.current.display.height)
                 if box[3] > region[1] and box[1] < region[3]:
@@ -205,24 +206,62 @@ class ScrollNavigator:
         for left, top, right, bottom in boxes:
             draw.rectangle((left - 4, top - 4, right + 3, bottom + 3), fill='white')
 
-    def _verify_unchanged(self, fresh, exclude=None):
+    def _alignment(self, before, after, area, ignored, tolerance, minimum=.998):
+        """Match the complete foreground with only known control changes masked."""
+        left, top, right, bottom = area
+        area = left, top + tolerance, right, bottom - tolerance
+        original = before.convert('RGB')
+        self._erase(original, ignored)
+        a = ink_rows(original.crop(area))
+        scores = []
+        for shift in range(-tolerance, tolerance + 1):
+            candidate = after.convert('RGB')
+            self._erase(candidate, [[x1, y1 + shift, x2, y2 + shift] for x1, y1, x2, y2 in ignored])
+            b = ink_rows(candidate.crop((area[0], area[1] + shift, area[2], area[3] + shift)))
+            scores.append((agreement(a, b), shift))
+        best, shift = max(scores)
+        competing = max((score for score, other in scores if abs(other - shift) > 1), default=0)
+        if best < minimum or competing > best - .025:
+            raise ScrollNavigationError('Question content does not align uniquely; no further input.')
+        return shift
+
+    def _verify_unchanged(self, fresh, exclude=None, pending=()):
         self.collector.check(self.question.frame, fresh, self.question.identity_box)
-        selected = self._selected_boxes()
+        selected = self._selected_boxes(identifiers=self.selected | set(pending))
+        proposed = self.shifts.copy()
+        panels = {self.views[key].bar.panel: panel for panel, key in self.active.items()}
         with Image.open(self.current.path) as before, Image.open(fresh.path) as after:
-            before, after = before.convert('RGB'), after.convert('RGB')
-            self._erase(before, selected.values())
-            self._erase(after, selected.values())
+            old, new = before.convert('RGB'), after.convert('RGB')
+            self._erase(old, selected.values())
+            self._erase(new, selected.values())
             for region in self.question.regions:
                 if region == exclude:
                     continue
+                panel = panels.get(region)
+                if panel is not None:
+                    view = self.views[self.active[panel]]
+                    original = find_scrollbar(before, view.region)
+                    actual = find_scrollbar(after, view.region)
+                    if original is None or not same_bar(original, actual, position=True):
+                        raise ScrollNavigationError('The question scrollbar moved or changed; no further input.')
                 left, top, right, bottom = region
                 box = left, top, right - 24, bottom
-                if before.crop(box).tobytes() != after.crop(box).tobytes():
+                if old.crop(box).tobytes() == new.crop(box).tobytes():
+                    continue
+                if panel is None:
                     raise ScrollNavigationError('Question or answer view changed; start a fresh cycle.')
+                # Native panels can nudge by a pixel when a radio/checkbox gains
+                # focus. Track each panel independently, without accepting a
+                # larger scroll or changed words/graphs as harmless movement.
+                shift = self._alignment(before, after, content_box(view), list(selected.values()), 3, minimum=1.0)
+                if shift == 0:
+                    raise ScrollNavigationError('Question or answer appearance changed; start a fresh cycle.')
+                proposed[panel] += shift
+        return proposed
 
-    def _verify_selected(self, fresh):
+    def _verify_selected(self, fresh, shifts=None):
         with Image.open(fresh.path) as actual:
-            for identifier, box in self._selected_boxes().items():
+            for identifier, box in self._selected_boxes(shifts).items():
                 node = self.records[identifier]
                 panel = node['panel']
                 region = content_box(self.views[self.active[panel]]) if panel else (0, 0, actual.width, actual.height)
@@ -240,38 +279,21 @@ class ScrollNavigator:
 
     def verify_current(self):
         fresh = self.capture.capture_frame()
-        self._verify_unchanged(fresh)
-        with Image.open(self.current.path) as before, Image.open(fresh.path) as after:
-            for panel, key in self.active.items():
-                view = self.views[key]
-                old = find_scrollbar(before, view.region)
-                new = find_scrollbar(after, view.region)
-                if old is None or not same_bar(old, new, position=True):
-                    raise ScrollNavigationError('The question scrollbar moved or changed; no further input.')
-        self._verify_selected(fresh)
+        proposed = self._verify_unchanged(fresh)
+        self._verify_selected(fresh, proposed)
+        self.shifts, self.current = proposed, fresh
         return fresh
 
     def _return_shift(self, view, fresh):
         left, top, right, bottom = content_box(view)
         tolerance = min(32, (bottom - top) // 8)
-        area = left, top + tolerance, right, bottom - tolerance
         selected = [box for identifier in self.selected
                     if (box := self._box_in_view(identifier, view.key)) is not None]
         with Image.open(view.frame.path) as original, Image.open(fresh.path) as actual:
-            original, actual = original.convert('RGB'), actual.convert('RGB')
-            self._erase(original, selected)
-            a = ink_rows(original.crop(area))
-            scores = []
-            for shift in range(-tolerance, tolerance + 1):
-                candidate = actual.copy()
-                self._erase(candidate, [[x1, y1 + shift, x2, y2 + shift] for x1, y1, x2, y2 in selected])
-                b = ink_rows(candidate.crop((area[0], area[1] + shift, area[2], area[3] + shift)))
-                scores.append((agreement(a, b), shift))
-        best, shift = max(scores)
-        competing = max((score for score, other in scores if abs(other - shift) > 1), default=0)
-        if best < .998 or competing > best - .025:
-            raise ScrollNavigationError('Returned answer view does not match its capture; no answer input.')
-        return shift
+            try:
+                return self._alignment(original, actual, (left, top, right, bottom), selected, tolerance)
+            except ScrollNavigationError:
+                raise ScrollNavigationError('Returned answer view does not match its capture; no answer input.') from None
 
     def prepare(self, point):
         identifier = point['target_id']
@@ -294,13 +316,14 @@ class ScrollNavigator:
                 fresh = self.collector.settled(self.question.frame, view.bar.panel, self.question.identity_box)
                 self.capture.backend.park_pointer(fresh, self.config.get('capture', {}).get('max_age_seconds', 90), self.stop_event)
                 fresh = self.capture.capture_frame()
-                self._verify_unchanged(fresh, exclude=view.bar.panel)
+                proposed = self._verify_unchanged(fresh, exclude=view.bar.panel)
                 with Image.open(fresh.path) as image:
                     restored = find_scrollbar(image, view.region)
                 if not same_bar(view.bar, restored) or abs(view.bar.thumb[1] - restored.thumb[1]) > 3:
                     raise ScrollNavigationError('Scrollbar did not return to the captured position; no answer input.')
                 shift = self._return_shift(view, fresh)
-                self.active[view.panel], self.shifts[view.panel] = key, shift
+                self.active[view.panel], proposed[view.panel] = key, shift
+                self.shifts = proposed
                 self.current = fresh
                 self._verify_selected(fresh)
                 self.returned_views.append(key)
@@ -314,6 +337,28 @@ class ScrollNavigator:
             raise ScrollNavigationError('Returned control does not match its captured location; no answer input.')
         self.current = fresh
         return fresh, point | {'click_x': x, 'click_y': y, 'target_control': actual}
+
+    def verify_selection(self, frame, point):
+        """Confirm a click after measuring tiny independent panel movements."""
+        identifier = point['target_id']
+        panel = self.records[identifier]['panel']
+        original_box = point['target_control']['box']
+
+        def verifier(fresh):
+            proposed = self._verify_unchanged(fresh, pending=(identifier,))
+            self._verify_selected(fresh, proposed)
+            delta = proposed.get(panel, 0) - self.shifts.get(panel, 0)
+            left, top, right, bottom = original_box
+            with Image.open(frame.path) as before, Image.open(fresh.path) as after:
+                before = before.crop((left - 6, top - 6, right + 6, bottom + 6))
+                after = after.crop((left - 6, top - 6 + delta, right + 6, bottom + 6 + delta))
+            control = {'kind': point['target_control']['kind'], 'box': [6, 6, before.width - 6, before.height - 6]}
+            if not selection_visible(before, after, control):
+                return False
+            self.shifts, self.current = proposed, fresh
+            return True
+
+        self.capture.verify_selection(frame, point, self.stop_event, verifier=verifier)
 
     def confirm(self, point):
         identifier = point['target_id']

@@ -1,5 +1,24 @@
 # Development milestones
 
+## 2026-10-17 — Track independent panel nudges after selections
+
+- Diagnosed a two-column categorization stop after its first confirmed selection:
+  the left question panel moved one pixel, while the right answer stayed stable.
+  The preceding MCMA confirmation failure likewise followed a one-pixel movement
+  in the answer panel; its checkbox had actually become selected.
+- Track each panel's tiny vertical offsets before input and during confirmation.
+  Require an exact foreground alignment within three pixels, unchanged question
+  identity, compatible native scrollbar geometry/position, and visibly preserved
+  selections. Larger movements and changed content still stop immediately.
+- Replayed both recorded failures without VM clicks. Added regressions for
+  independent question-panel nudges, checkbox confirmation after answer-panel
+  nudges, rejection of larger movement, and rejection of even a one-pixel content
+  edit. All 48 targeted tests passed in 62.128 seconds.
+- A live API retry preserved the first table answer and visually confirmed both
+  remaining rows at 95% confidence, from one inference request.
+- All 229 tests passed in 245.027 seconds with Lightpanda, Chromium, and native
+  login integrations enabled. Updated the README and validation notes.
+
 ## 2026-10-17 — Return to answers across scroll views
 
 - Scroll mode now indexes answer controls across the captured sections for API,

@@ -185,7 +185,7 @@ class SethEngine:
                         click = self.clicker.click(target_frame, target['click_x'], target['click_y'], self.stop_event)
                         completed_clicks.append(click | {key: target[key] for key in
                                                         ('target_id', 'target_view', 'row', 'choice', 'option') if key in target})
-                        self.capture.verify_selection(target_frame, target, self.stop_event)
+                        navigation.verify_selection(target_frame, target)
                         completed_clicks[-1]['selection_verified'] = True
                         navigation.confirm(target)
                         self.progress = ('selecting', f'Selected {len(completed_clicks)}/{len(plan)}')

@@ -58,7 +58,7 @@ class SethCapture:
             if before.convert("RGB").crop(box).tobytes() != after.convert("RGB").crop(box).tobytes():
                 raise VMError("Remaining answer control changed; no further input. Start a fresh cycle.")
 
-    def verify_selection(self, frame, target, stop_event=None):
+    def verify_selection(self, frame, target, stop_event=None, *, verifier=None):
         """Confirm a grounded control became selected; never retry the click."""
         if stop_event is not None and stop_event.is_set():
             raise VMError("Cycle cancelled while confirming selection; no further input.")
@@ -72,9 +72,13 @@ class SethCapture:
             fresh = self.capture_frame()
             if fresh.display != frame.display:
                 raise VMError("VM or guest display changed while confirming selection; no further input.")
-            with Image.open(frame.path) as before, Image.open(fresh.path) as after:
-                if selection_visible(before, after, target["target_control"]):
+            if verifier is not None:
+                if verifier(fresh):
                     return
+            else:
+                with Image.open(frame.path) as before, Image.open(fresh.path) as after:
+                    if selection_visible(before, after, target["target_control"]):
+                        return
             if time.monotonic() >= deadline:
                 raise VMError("Input was sent, but the answer control did not become visibly selected; no further input.")
             if stop_event is not None:

@@ -32,6 +32,8 @@ class ScrollingVM(SethCapture):
         self.backend, self.max_age, self.counter = self, 90, 0
         self.panels = [360, 30] if two_panels else [360]
         self.positions = {panel: 1 for panel in self.panels}
+        self.drifts = dict.fromkeys(self.panels, 0)
+        self.post_click_shifts, self.question_panels = {}, set()
         self.selected, self.drags, self.clicks = set(), [], []
         self.header, self.stuck, self.drift = 'Question 1', False, 0
         self.mutate, self.fail_click = None, 0
@@ -47,6 +49,10 @@ class ScrollingVM(SethCapture):
     def document(self, panel):
         image = Image.new('RGB', (296, 950), 'white')
         draw = ImageDraw.Draw(image)
+        if panel in self.question_panels:
+            for row in range(45):
+                draw.text((8, 15 + row * 20), f'Question paragraph {row}: details {row * 37}', fill='black')
+            return image
         for index, (x, y) in enumerate(self.centers):
             draw_control(image, self.kind, (x, y), selected=(panel, index) in self.selected)
             if self.kind == 'checkbox':
@@ -63,7 +69,7 @@ class ScrollingVM(SethCapture):
         image = Image.new('RGB', (720, 540), 'white')
         ImageDraw.Draw(image).text((45, 95), self.header, fill='black')
         for panel in self.panels:
-            offset = round(self.positions[panel] * (950 - 306)) + self.drift
+            offset = round(self.positions[panel] * (950 - 306)) + self.drift + self.drifts[panel]
             image.paste(self.document(panel).crop((0, offset, 296, offset + 306)), (panel, 157))
             native = screen(self.positions[panel], x=panel + 306, thumb_height=84)
             image.paste(native.crop((panel + 300, 150, panel + 324, 464)), (panel + 300, 150))
@@ -88,7 +94,7 @@ class ScrollingVM(SethCapture):
 
     def click(self, frame, x, y, max_age, stop_event=None):
         panel = max(p for p in self.panels if p <= x)
-        offset = round(self.positions[panel] * (950 - 306)) + self.drift
+        offset = round(self.positions[panel] * (950 - 306)) + self.drift + self.drifts[panel]
         index = min(range(len(self.centers)), key=lambda i: abs(self.centers[i][0] + panel - x) + abs(self.centers[i][1] + 157 - offset - y))
         cx, cy = self.centers[index]
         if abs(cx + panel - x) > 2 or abs(cy + 157 - offset - y) > 2:
@@ -98,6 +104,8 @@ class ScrollingVM(SethCapture):
             if self.kind == 'radio':
                 self.selected.difference_update({(panel, i) for i in range(len(self.centers)) if self.centers[i][1] == cy})
             self.selected.add((panel, index))
+        for moved_panel, shift in self.post_click_shifts.items():
+            self.drifts[moved_panel] += shift
         return {'click_x': x, 'click_y': y}
 
 
@@ -123,7 +131,7 @@ class ScrollNavigationTests(unittest.TestCase):
             frame, target = nav.prepare(point)
             vm.verify_target(frame, target['click_x'], target['click_y'])
             vm.click(frame, target['click_x'], target['click_y'], 90)
-            vm.verify_selection(frame, target, self.stop)
+            nav.verify_selection(frame, target)
             nav.confirm(target)
 
     def test_graph_options_receive_one_id_despite_overlap_and_select_across_views(self):
@@ -158,6 +166,45 @@ class ScrollNavigationTests(unittest.TestCase):
         self.assertEqual(len(nav.controls), 10)
         self.execute(vm, nav, self.decision(nav, ['01', '06', '05', '10']))
         self.assertEqual(vm.selected, {(360, 0), (360, 4), (30, 0), (30, 4)})
+
+    def test_question_panel_pixel_nudges_after_table_clicks_are_tracked_independently(self):
+        vm = ScrollingVM(self.root, 'radio', two_panels=True)
+        vm.question_panels = {30}
+        vm.post_click_shifts = {30: -1}
+        _, nav = self.collect(vm)
+        self.assertEqual(len(nav.controls), 18)
+        self.execute(vm, nav, self.decision(nav, [f'{index:02d}' for index in range(1, 19, 2)], 'classification'))
+        self.assertEqual(len(vm.clicks), 9)
+        self.assertEqual(nav.shifts[2], 9)
+        self.assertEqual(vm.selected, {(360, index) for index in range(0, 18, 2)})
+        nav.verify_current()
+
+    def test_answer_panel_nudges_after_checkbox_clicks_are_verified_without_reclicking(self):
+        vm = ScrollingVM(self.root)
+        vm.post_click_shifts = {360: -1}
+        _, nav = self.collect(vm)
+        self.execute(vm, nav, self.decision(nav, ['01', '03', '05']))
+        self.assertEqual(vm.clicks, [(360, 0), (360, 2), (360, 4)])
+        self.assertEqual(nav.shifts[1], 3)
+        nav.verify_current()
+
+    def test_larger_post_click_scroll_stops_before_any_second_click(self):
+        vm = ScrollingVM(self.root)
+        vm.post_click_shifts = {360: -8}
+        _, nav = self.collect(vm)
+        with self.assertRaises(ScrollNavigationError):
+            self.execute(vm, nav, self.decision(nav, ['01', '03']))
+        self.assertEqual(len(vm.clicks), 1)
+        self.assertEqual(nav.selected, set())
+
+    def test_tiny_scroll_does_not_hide_even_a_small_foreground_change(self):
+        vm = ScrollingVM(self.root)
+        _, nav = self.collect(vm)
+        vm.drifts[360] = -1
+        vm.mutate = lambda image: ImageDraw.Draw(image).point((650, 250), fill='black')
+        with self.assertRaises(ScrollNavigationError):
+            nav.verify_current()
+        self.assertEqual(vm.clicks, [])
 
     def test_small_return_offset_is_locally_verified_before_using_fresh_coordinates(self):
         vm = ScrollingVM(self.root)

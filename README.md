@@ -263,7 +263,7 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
-The latest complete run on this host (2026-10-17) passed **225 tests** with all
+The latest complete run on this host (2026-10-17) passed **229 tests** with all
 three integration flags enabled. Local browser fixtures verified combined-image
 uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
 context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
@@ -275,8 +275,8 @@ covers PNG/JPEG preview conversion, API MIME detection, JPEG scroll references,
 and recovery from unsent attachment drafts. Replaying the actual large Gemini
 scroll image completed successfully after its preview was converted to JPEG.
 Scroll-back coverage includes graphical MCMA options, tall classification tables,
-overlap deduplication, independent panels, restored-control checks, and stopping
-after an unconfirmed click. Live Qwen cycles selected all three categorization
+overlap deduplication, independent panels, verified tiny panel nudges, restored-control
+checks, and stopping after an unconfirmed click. Live Qwen cycles selected all three categorization
 rows across two views and two graph-MCMA options across two other views; every
 selection was visually confirmed. Both plans reported 90% confidence.
 
@@ -507,6 +507,15 @@ as VM click coordinates. Full status shows **Returning to section …** and sele
 counts. The existing Scroll toggle enables this behavior; no additional hotkey
 or model request is needed for the return trips. API/Gemini Single capture retains
 its coordinate behavior.
+
+Between clicks, each native panel can also account for a vertical nudge of at
+most three pixels. This requires unchanged VM/question identity, matching native
+scrollbar geometry and position, and an exact foreground match after alignment.
+Previously selected controls remain verified. The same check runs during click
+confirmation, so a tiny movement in either the question or answer panel does not
+cause a false stop. Larger movements, changed content, and ambiguous matches stop
+the cycle without retrying a click.
+
 The collector requires a recognizable native gray scrollbar thumb and matching
 arrow buttons within the configured columns. It checks the question header and
 VM identity throughout capture, and the visible question/answer pixels before

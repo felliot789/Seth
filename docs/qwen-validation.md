@@ -395,6 +395,41 @@ All 225 tests passed in 226.830 seconds with Lightpanda, Chromium, and native
 login integrations enabled. The full report is kept privately at
 `captures/scroll-navigation-full-regression.log`.
 
+## Independent panel nudges after selections
+
+On the later Bahasa Indonesia mock, both native columns were captured correctly.
+The API table plan at 11:52 confirmed its first answer, then the left question
+panel's text moved down one pixel (its thumb moved up one pixel). The right
+answer panel stayed fixed. The exact current-view check stopped the plan before
+the next selection. A preceding MCMA cycle had selected its second checkbox, but
+the answer panel moved one pixel and the unadjusted glyph check failed.
+
+Current-view and post-click checks now track each native panel independently.
+A passive adjustment is bounded to three vertical pixels, requires an exact
+foreground match and unique alignment, and retains VM/header, scrollbar, and
+previous-selection checks. Known selection glyph changes are masked only during
+content comparison; their selected state must still be confirmed separately.
+Larger movement, even a small foreground content edit, or ambiguous alignment
+stops input. No failed click is retried.
+
+Both actual failure image pairs passed capture-only replays, recorded in
+`captures/panel-drift-replay-result.json`: the table pair yielded left-panel
+offset +1/right-panel offset 0, and the MCMA pair yielded left 0/right +1. The
+replays sent zero VM clicks. All 48 targeted tests passed in 62.128 seconds,
+including nine table selections while the question panel nudges after each click,
+three checkbox confirmations while the answer panel nudges, and rejection of
+larger movement or altered foreground pixels.
+
+A live API retry of the same two-column table captured six views, preserved its
+already selected first row, and selected the remaining **Benar / Salah** rows at
+confidence 0.95. Both new selections were visually confirmed. The complete
+decision and confirmation flags are saved privately in
+`captures/panel-drift-live-table-result.json`.
+
+All 229 tests passed in 245.027 seconds with Lightpanda, Chromium, and native
+login integration suites enabled. The full report is saved privately at
+`captures/panel-drift-full-regression.log`.
+
 ## Local regression coverage
 
 `tests/test_qwen_web.py` drives a real Chromium against a local HTTP fixture.
@@ -418,8 +453,9 @@ strict ID resolution for all three question types, and post-click confirmation.
 Cycle tests verify that an unchecked control produces an error and no click retry,
 and that a failed confirmation stops a multi-answer plan before further input.
 
-The complete suite passed all 150 tests in 133.453 seconds with Lightpanda,
-Chromium, and native-login integrations enabled after these changes.
+An earlier checkpoint passed all 150 tests in 133.453 seconds with Lightpanda,
+Chromium, and native-login integrations enabled; later full-suite results are
+recorded above.
 
 Run the Qwen regressions with:
 
@@ -429,8 +465,6 @@ SETH_CHROMIUM_TESTS=1 .venv/bin/python -m unittest tests.test_qwen_web -v
 
 ## Remaining checks
 
-- Real VM MCMA and table execution through Qwen. Controlled screenshots cover
-  those plans, but only single-choice selection has been confirmed in the VM.
 - Longer sessions, quota exhaustion, and provider UI changes. Such failures stop
   the affected provider attempt; they do not relax answer validation or retry an
   ambiguous submission to the same provider.
