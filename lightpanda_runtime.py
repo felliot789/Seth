@@ -196,6 +196,7 @@ class Lightpanda:
                     raise AIError(f"{self.label} exceeded the control response limit.", "browser_error")
                 response = json.loads(raw)
                 if response.get("id") != self.counter:
+                    self._handle_event(response)
                     continue
                 if response.get("error"):
                     raise AIError(f"{self.label} does not support this operation: {method}.", "browser_protocol")
@@ -204,8 +205,14 @@ class Lightpanda:
             self.remaining()
             raise AIError(f"{self.label}'s control connection failed.", "browser_error") from None
 
-    def evaluate(self, expression):
-        result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    def _handle_event(self, event):
+        pass
+
+    def evaluate(self, expression, *, user_gesture=False):
+        parameters = {"expression": expression, "returnByValue": True}
+        if user_gesture:
+            parameters["userGesture"] = True
+        result = self.call("Runtime.evaluate", parameters)
         if result.get("exceptionDetails"):
             raise AIError(f"{self.label} could not execute a page operation; the website may use unsupported browser features.",
                           "browser_javascript")

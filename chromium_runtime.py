@@ -1,5 +1,6 @@
 """Optional installed Chromium runtime using the same bounded, direct CDP client."""
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,7 @@ class Chromium(Lightpanda):
         self.state_file = Path(state_file) if state_file else None
         self.keep_open = keep_open
         self.reuse_page = False
+        self._file_chooser_node = None
         super().__init__(executable=find_chromium(executable) or "/nonexistent/chromium", **kwargs)
 
     def __enter__(self):
@@ -132,6 +134,51 @@ class Chromium(Lightpanda):
             # chat upload menus and image preprocessing need. This keeps the tab
             # rendering without restoring the window or taking desktop focus.
             self.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+
+    @contextmanager
+    def intercept_file_chooser(self):
+        """Keep programmatic uploads from opening an OS file picker."""
+        import websocket
+        self._file_chooser_node = None
+        try:
+            self.call("Page.setInterceptFileChooserDialog", {"enabled": True})
+            yield
+        finally:
+            # Restore manual uploads even if a cancelled/timed-out operation
+            # cannot make another deadline-bound call. A later call can discard
+            # this cleanup command's response, just like other unmatched events.
+            if self.ws is not None:
+                try:
+                    self.counter += 1
+                    self.ws.settimeout(0.2)
+                    self.ws.send(json.dumps({"id": self.counter,
+                        "method": "Page.setInterceptFileChooserDialog",
+                        "params": {"enabled": False}, "sessionId": self.session}))
+                except (OSError, websocket.WebSocketException):
+                    pass
+            self._file_chooser_node = None
+
+    def _handle_event(self, event):
+        if event.get("method") == "Page.fileChooserOpened" and event.get("sessionId") == self.session:
+            node = event.get("params", {}).get("backendNodeId")
+            if type(node) is int and node > 0:
+                self._file_chooser_node = node
+
+    def set_chooser_file(self, image_path):
+        """Assign the input Chromium actually opened, even if the DOM changed."""
+        def chooser():
+            if self._file_chooser_node is None:
+                self.evaluate("true")  # Receive a chooser event queued after the click reply.
+            return self._file_chooser_node
+
+        node = self.wait(chooser)
+        remote = self.call("DOM.resolveNode", {"backendNodeId": node})["object"]["objectId"]
+        # Re-selecting the same file must still emit change. Clear the chooser's
+        # actual input without dispatching an empty change event to its handler.
+        self.call("Runtime.callFunctionOn", {"objectId": remote,
+            "functionDeclaration": "function(){this.value='';return true}", "returnByValue": True})
+        self.call("DOM.setFileInputFiles", {
+            "backendNodeId": node, "files": [str(Path(image_path).resolve())]})
 
     def close(self):
         if self.keep_open and self.ws is not None:

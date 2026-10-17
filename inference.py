@@ -21,19 +21,36 @@ def screenshot_size(image_path):
         return image.size
 
 
-def build_prompt(width, height):
+def build_prompt(width, height, *, coordinate_space="normalized_1000"):
+    if coordinate_space == "normalized_1000":
+        coordinates = (
+            "Use an integer 0..1000 grid over the ENTIRE screenshot: "
+            "(0,0) is the top-left corner and (1000,1000) is the bottom-right. "
+            "click_x increases rightward; click_y increases downward. "
+            "The host converts your normalized point to screenshot pixels. "
+        )
+    elif coordinate_space == "pixels":
+        coordinates = (
+            f"Report integer coordinates in the original {width}-pixel wide by {height}-pixel tall image. "
+            f"The top left is (0,0), the image center is ({width // 2},{height // 2}), "
+            f"and the bottom right is ({width - 1},{height - 1}). "
+            "Return the center of each visible radio circle or checkbox in those original pixel coordinates. "
+            "Do not normalize or rescale coordinates. "
+        )
+    else:
+        raise ValueError("Unsupported prompt coordinate space.")
     return (
         f"Analyze this {width} by {height} screenshot. Answer the currently visible "
         "question when its required selections are unambiguous. First identify "
         "whether it requires one answer, multiple answers (MCMA), or one category "
         "per table row, using both the instructions and answer controls. "
         "For a single-choice radio question return a single JSON object: "
-        '{"action":"click","coordinate_space":"normalized_1000",'
+        f'{{"action":"click","coordinate_space":"{coordinate_space}",'
         '"click_x":integer,"click_y":integer,'
         '"confidence":number,"explanation":string}. '
         "For a classification table return "
         '{"action":"select","selection_type":"classification",'
-        '"coordinate_space":"normalized_1000","selections":['
+        f'"coordinate_space":"{coordinate_space}","selections":['
         '{"row":1,"choice":"column label","click_x":integer,"click_y":integer}],'
         '"confidence":number,"explanation":string}. '
         "Include one selection for EACH unanswered row, numbered from 1 at the top. "
@@ -42,7 +59,7 @@ def build_prompt(width, height):
         "'jawaban benar lebih dari satu' or 'pilih semua jawaban yang benar', "
         "evaluate EVERY option independently and return this complete JSON object: "
         '{"action":"select","selection_type":"multiple_answer",'
-        '"coordinate_space":"normalized_1000","selections":['
+        f'"coordinate_space":"{coordinate_space}","selections":['
         '{"option":"option label","click_x":integer,"click_y":integer}],'
         '"confidence":number,"explanation":string}. '
         "Include ALL correct unchecked options, not just the first one; use this "
@@ -54,10 +71,7 @@ def build_prompt(width, height):
         "Use at most 10 selections for this one question. Skip already selected "
         "answers; if existing selections are incorrect or any required answer is "
         "uncertain, return action none. Use the lowest confidence across the plan. "
-        "Use an integer 0..1000 grid over the ENTIRE screenshot: "
-        "(0,0) is the top-left corner and (1000,1000) is the bottom-right. "
-        "click_x increases rightward; click_y increases downward. "
-        "The host converts your normalized point to screenshot pixels. "
+        f"{coordinates}"
         "Choose the center of the answer control. "
         'Return {"action":"none","confidence":0,"explanation":string} '
         "for login screens, loading screens, fully answered questions, ambiguity, "

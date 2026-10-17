@@ -1,7 +1,7 @@
 """Browser screenshot inference with per-site adapters and bounded fallback."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import http.cookiejar
 import json
@@ -73,20 +73,22 @@ SITES = {
         "cookie_domains": ("qwen.ai", "qwenlm.ai"),
         "model_label": "",
         "selectors": {
-            "editor": 'textarea, [contenteditable="true"][role="textbox"]',
-            "model": '[data-testid="model-selector"]',
-            "file": 'input[type="file"]',
-            "upload": 'button[aria-label="Upload files"]',
-            "upload_item": '[role="menuitem"]',
-            "attachment": '[data-testid="attachment-preview"]',
-            "upload_busy": '[data-testid="attachment-preview"] [role="progressbar"]',
-            "send": 'button[aria-label="Send message"]',
-            "user": '[data-message-author-role="user"]',
-            "response": '[data-message-author-role="assistant"]',
-            "answer": '.markdown',
-            "complete": 'button[aria-label="Copy"]',
-            "stop": 'button[aria-label="Stop generating"]',
-            "error": '[role="alert"]',
+            "editor": 'textarea.message-input-textarea',
+            "model": '[role="button"][aria-label="Select Model"]',
+            "thinking": '.qwen-thinking-selector .qwen-chat-v2-dropdown-menu-select-label',
+            "file": '#filesUpload[type="file"]',
+            "upload": '[role="button"][aria-label="Select Mode"]',
+            "upload_item": '[role="menuitem"]:not([aria-disabled="true"]):not(.qwen-chat-v2-dropdown-menu-item-disabled) .mode-select-dropdown-item-name',
+            "attachment": '.message-input-column-file .vision-item-container',
+            "upload_busy": '.message-input-column-file .vision-item-container-uploading, .message-input-column-file .vision-item-loading-icon, .message-input-column-file [role="progressbar"], .message-input-column-file .ant-spin-spinning',
+            "send": 'button.send-button[aria-label="Send"]',
+            "user": '.qwen-chat-message-user',
+            "response": '.qwen-chat-message-assistant',
+            "answer": '.response-message-content.phase-answer .qwen-markdown',
+            "complete": '.response-message-footer button[aria-label="Copy"]',
+            "stop": 'button.stop-button[aria-label="Stop"]',
+            "error": '[role="alert"], .ant-message-error',
+            "new_chat": '[role="button"][aria-label="New Chat"]',
         },
     },
 }
@@ -106,8 +108,9 @@ const label=e=>[text(e),e.getAttribute('aria-label')||'',e.getAttribute('title')
 """
 
 
-def dom(page, body, *arguments):
-    return page.evaluate("((args)=>{" + DOM_HELPERS + body + "})(" + json.dumps(arguments) + ")")
+def dom(page, body, *arguments, user_gesture=False):
+    expression = "((args)=>{" + DOM_HELPERS + body + "})(" + json.dumps(arguments) + ")"
+    return page.evaluate(expression, user_gesture=True) if user_gesture else page.evaluate(expression)
 
 
 class SiteAdapter:
@@ -121,9 +124,13 @@ class SiteAdapter:
         self.model_label = self.options.get("model_label", self.site["model_label"])
         self.thinking_label = self.options.get("thinking_label", "")
 
+    def build_prompt(self, width, height):
+        return build_prompt(width, height)
+
     def snapshot(self, page):
         return dom(page, """
 const s=args[0], models=all(s.model),users=all(s.user),responses=all(s.response);
+const thinking=s.thinking?all(s.thinking):[];
 const response=responses.length===1?responses[0]:null;
 const answers=response?all(s.answer,response):[];
 let answer='',oversize=false;
@@ -136,6 +143,7 @@ if(answers.length===1){
 }
 return {url:location.href,editors:all(s.editor).length,
  model:models.length===1?label(models[0]):'',modelCount:models.length,
+ ...(s.thinking?{thinking:thinking.length===1?label(thinking[0]):'',thinkCount:thinking.length}:{}),
  users:users.map(text),responses:responses.length,answer,oversize,
  attachments:all(s.attachment).map(label),uploading:all(s.upload_busy).length>0,
  send:all(s.send).length===1&&!all(s.send)[0].disabled&&all(s.send)[0].getAttribute('aria-disabled')!=='true',
@@ -165,9 +173,12 @@ return {url:location.href,editors:all(s.editor).length,
         if state["modelCount"] != 1 or not re.search(
                 r"(?<!\w)" + re.escape(self.model_label.strip()) + r"(?!\w)", state["model"], re.I):
             raise AIError(f"{self.name}: the selected model does not match the configured model label.", "browser_model")
-        if self.thinking_label.strip() and not re.search(
-                r"(?<!\w)" + re.escape(self.thinking_label.strip()) + r"(?!\w)", state["model"], re.I):
-            raise AIError(f"{self.name}: the thinking level does not match the configured label.", "browser_model")
+        if self.thinking_label.strip():
+            separate = bool(self.selectors.get("thinking"))
+            selected = state.get("thinking", "") if separate else state["model"]
+            if (separate and state.get("thinkCount", 0) != 1) or not re.search(
+                    r"(?<!\w)" + re.escape(self.thinking_label.strip()) + r"(?!\w)", selected, re.I):
+                raise AIError(f"{self.name}: the thinking level does not match the configured label.", "browser_model")
 
     def wait_state(self, page, condition):
         def poll():
@@ -198,7 +209,7 @@ return {url:location.href,editors:all(s.editor).length,
 const matches=all(args[0]).filter(e=>args[1]===null||text(e).toLowerCase()===args[1].toLowerCase());
 if(matches.length!==1||matches[0].disabled||matches[0].getAttribute('aria-disabled')==='true')return false;
 matches[0].click();return true;
-""", selector, matching_text)
+""", selector, matching_text, user_gesture=self.name == "qwen" and isinstance(page, Chromium))
         if not result:
             raise AIError(f"{self.name}: a required page control is missing, ambiguous, or disabled.", "browser_layout")
 
@@ -226,6 +237,9 @@ inputs[0].setAttribute('data-seth-upload',args[1]);return '[data-seth-upload="'+
                 self.click(page, self.selectors["upload_item"], upload_text)
                 selector = page.wait(select_input)
         page.set_file(selector, image_path)
+        self.wait_attachment(page, image_path)
+
+    def wait_attachment(self, page, image_path):
         state = self.wait_state(page, lambda s: len(s["attachments"]) == 1
                                 and self.attachment_matches(s["attachments"][0], image_path)
                                 and not s["uploading"] and s["send"])
@@ -295,6 +309,54 @@ return true;
         return page.wait(completed)
 
 
+class QwenSiteAdapter(SiteAdapter):
+    def build_prompt(self, width, height):
+        # Live table probes exposed double normalization in Qwen's output.
+        # Original-pixel grounding passed at both tested image aspect ratios.
+        return build_prompt(width, height, coordinate_space="pixels")
+
+    def prepare(self, page):
+        if not getattr(page, "reuse_page", False):
+            page.navigate(self.site["url"])
+            page.reuse_page = True
+        # Qwen first renders an anonymous shell, then loads the saved account.
+        # Do not mistake that transient Log in button for a lost session.
+        login_since = None
+
+        def mounted():
+            nonlocal login_since
+            state = self.snapshot(page)
+            if urlsplit(state["url"]).netloc != urlsplit(self.site["url"]).netloc or state["challenge"]:
+                self.check_state(state)
+            if state["login"]:
+                if login_since is None:
+                    login_since = time.monotonic()
+                elif time.monotonic() - login_since >= 5:
+                    self.check_state(state)
+                return None
+            login_since = None
+            return state if state["editors"] and state["modelCount"] else None
+
+        page.wait(mounted)
+        return super().prepare(page)
+
+    def attach(self, page, image_path):
+        # The hidden input is always present, but Qwen arms its one-shot upload
+        # handler only when Upload attachment is selected, on every upload.
+        self.click(page, self.selectors["upload"])
+        upload_text = self.options.get("upload_text", "Upload attachment")
+        page.wait(lambda: dom(page,
+            "return all(args[0]).filter(e=>text(e).toLowerCase()===args[1].toLowerCase()).length===1;",
+            self.selectors["upload_item"], upload_text))
+        with page.intercept_file_chooser() if isinstance(page, Chromium) else nullcontext():
+            self.click(page, self.selectors["upload_item"], upload_text)
+            if isinstance(page, Chromium):
+                page.set_chooser_file(image_path)
+                self.wait_attachment(page, image_path)
+            else:
+                super().attach(page, image_path)
+
+
 class WebInferenceClient(DecisionClient):
     def __init__(self, config=None, *, stop_event=None, progress=None):
         self.config = config if config is not None else load_config()
@@ -314,7 +376,8 @@ class WebInferenceClient(DecisionClient):
         return self.state_dir / provider / "cookies.json"
 
     def adapter(self, provider):
-        return SiteAdapter(provider, self.web.get("sites", {}).get(provider, {}))
+        adapter_type = QwenSiteAdapter if provider == "qwen" else SiteAdapter
+        return adapter_type(provider, self.web.get("sites", {}).get(provider, {}))
 
     def engine(self, provider):
         return self.web.get("sites", {}).get(provider, {}).get("engine", self.web.get("engine", "lightpanda"))
@@ -468,7 +531,7 @@ class WebInferenceClient(DecisionClient):
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
                 raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
-                    page, image_path, prompt or build_prompt(width, height), self._report))
+                    page, image_path, prompt or adapter.build_prompt(width, height), self._report))
                 self.parse_coordinates(raw, width, height)
                 self.last_provider = provider
                 LOG.info("Web inference completed using %s", provider)

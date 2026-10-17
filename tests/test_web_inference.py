@@ -82,6 +82,25 @@ class WebClientTests(unittest.TestCase):
                 adapter.verify_model({"modelCount": 1, "model": model})
             self.assertEqual(caught.exception.code, "browser_model")
 
+    def test_qwen_requires_one_matching_separate_thinking_control(self):
+        adapter = SiteAdapter("qwen", {"model_label": "Qwen3.7-Plus", "thinking_label": "Thinking"})
+        state = {"modelCount": 1, "model": "Qwen3.7-Plus", "thinkCount": 1, "thinking": "Thinking"}
+        adapter.verify_model(state)
+        for change in ({"thinking": "Fast"}, {"thinking": "ThinkingPlus"},
+                       {"thinking": ""}, {"thinking": "   "},
+                       {"thinkCount": 0}, {"thinkCount": 2}, {"model": "Other Model"}):
+            with self.subTest(change=change), self.assertRaises(AIError) as caught:
+                adapter.verify_model(state | change)
+            self.assertEqual(caught.exception.code, "browser_model")
+        # A model label mentioning Thinking cannot substitute for the separate control.
+        with self.assertRaises(AIError) as caught:
+            adapter.verify_model({"modelCount": 1, "model": "Qwen3.7-Plus Thinking"})
+        self.assertEqual(caught.exception.code, "browser_model")
+
+    def test_qwen_unconfigured_thinking_does_not_require_a_control(self):
+        adapter = SiteAdapter("qwen", {"model_label": "Qwen3.7-Plus", "thinking_label": ""})
+        adapter.verify_model({"modelCount": 1, "model": "Qwen3.7-Plus"})
+
     def test_fallback_is_ordered_and_each_provider_is_attempted_once(self):
         calls, deadlines = [], []
         raw = '{"action":"none"}'
@@ -418,8 +437,11 @@ class LightpandaIntegrationTests(unittest.TestCase):
             page.save_cookies(cookies)
         self.assertEqual(cookies.stat().st_mode & 0o777, 0o600)
         with self.browser(cookies=cookies) as page:
-            page.navigate(self.adapter().site["url"])
-            self.assertIn("seth_test=restored", page.wait(lambda: page.evaluate("document.cookie")))
+            # Check before navigating: the fixture would otherwise set the same
+            # cookie again and hide a failed restore.
+            restored = page.call("Network.getAllCookies").get("cookies", [])
+            self.assertTrue(any(c["name"] == "seth_test" and c["value"] == "restored"
+                                for c in restored))
 
     def test_cancellation_terminates_waiting_and_browser_process(self):
         runtime = self.browser()
@@ -443,6 +465,24 @@ class ChromiumIntegrationTests(LightpandaIntegrationTests):
         return Chromium(executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),
                         profile=self.root / "profile", deadline=time.monotonic() + timeout,
                         stop_event=self.stop, cookies=cookies)
+
+    def test_native_profile_retains_persistent_cookie_without_export_or_import(self):
+        profile = self.root / "native-cookie-profile"
+        headed = os.environ.get("SETH_CHROMIUM_HEADED_TESTS") == "1"
+        for phase, headless in enumerate((not headed, True, not headed)):
+            with self.subTest(phase=phase), Chromium(
+                    executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),
+                    profile=profile, headless=headless, deadline=time.monotonic() + 10) as page:
+                if phase == 0:
+                    page.call("Network.setCookies", {"cookies": [{
+                        "name": "native_persistence", "value": "synthetic-test",
+                        "domain": "example.invalid", "path": "/", "secure": True,
+                        "httpOnly": True, "expires": time.time() + 86400,
+                    }]})
+                # No website navigation or cookie export/import can recreate it.
+                saved = page.call("Network.getAllCookies").get("cookies", [])
+                self.assertTrue(any(c["name"] == "native_persistence"
+                                    and c["value"] == "synthetic-test" for c in saved))
 
     def test_reconnected_background_chat_renders_upload_menu_without_activating_its_tab(self):
         state = self.root / "background-browser.json"

@@ -129,6 +129,27 @@ question cues; no-action explanations are retained to make future failures easie
 to diagnose. This user confirmation is separate from the controlled screenshot
 and full-cycle measurements above.
 
+## Google session persistence investigation (2026-10-16)
+
+The native profile is persistent, but Google authentication has not reliably
+survived reopening it. A read-only inspection found that the earlier cookie export
+contained persistent Google authentication cookies expiring in 2027, while the
+native cookie database no longer contained those authentication cookies. Other
+older encrypted Google cookies remained. This is selective authentication-cookie
+loss, not evidence that Chromium discards the entire profile. The removal's cause
+has not been established; Google invalidation and browser account reconciliation
+remain hypotheses. The current listener and interactive desktop environments match.
+
+A disposable native profile retained a synthetic persistent cookie across visible
+Chromium, headless Chromium, and visible Chromium restarts, without cookie imports
+or any Google account. A dedicated native-profile regression now checks this path.
+The existing export/import test now inspects cookies before navigation, so the
+fixture cannot hide a failed restore by setting the same cookie again. Neither
+test demonstrates persistence of a real Google login. The next live diagnosis
+must compare authentication-cookie presence before shutdown, immediately after
+restart, and after contacting Google to locate when it disappears. Cookie values
+must remain private. No encryption or Google sign-in flags have been changed.
+
 ## Remaining acceptance checks
 
 1. Browser restart does not reliably restore authentication: after the next desktop
@@ -140,8 +161,11 @@ and full-cycle measurements above.
    compatibility is fixed. Lightpanda can pass file bytes but does
    not decode images, so a site requiring browser image dimensions or canvas
    resizing may fail before submission.
-3. Verify ChatGPT and Qwen independently, including their signed-in DOM selectors
-   and completion signals, before adding them as operational fallbacks.
+3. ChatGPT web was withdrawn from the configured fallbacks at the user's request.
+   Qwen's [terms](https://qwen.ai/termsservice), section
+   II.2(b), prohibit automated interactions and extraction. After being informed,
+   the user instructed development to continue. Qwen is now configured after
+   authenticated screenshot and fallback tests; see [Qwen validation](qwen-validation.md).
 4. A live VM dry cycle and an explicitly requested full listener execution have
    passed. Continue using the existing shortcut for each new question; broader
    question formats and long-running sessions still need real-world validation.

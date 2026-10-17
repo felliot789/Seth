@@ -127,11 +127,16 @@ system packages. Each downloaded version has its SHA-256 recorded in
 `release.json`; `current` selects the installed version. Startup never downloads
 or updates the browser. Set `web.executable_path` to pin a specific binary.
 
-The configured fallback order is Gemini, ChatGPT, then Qwen. Each site needs its
-own sign-in session and the visible label of the selected vision model
-in `web.sites.<provider>.model_label`. ChatGPT and Qwen start with empty labels
-and are skipped until configured. Their adapter selectors are provisional and
-must be verified against the signed-in web layouts before enabling them.
+The configured provider order is Gemini (Argon / Medium), then Qwen
+(Qwen3.8-Omni-Flash / Thinking). Both use dedicated persistent Chromium profiles.
+Each site needs its own sign-in session and the visible label of the selected
+vision model in `web.sites.<provider>.model_label`. Qwen also verifies its separate
+thinking control. Its screenshot uploads, single-choice and MCMA answers, repeated
+same-file questions, and a controlled fallback from Gemini have passed live tests;
+see [Qwen validation](docs/qwen-validation.md) for scope and remaining checks.
+ChatGPT web integration has been withdrawn from the configuration because
+[OpenAI's consumer terms](https://openai.com/policies/terms-of-use/) prohibit
+automated extraction of outputs. The existing API backend remains available.
 
 The login helper uses an installed Chromium/Chrome browser for manual sign-in.
 It saves the native profile for Chromium and exports only the selected site's
@@ -139,12 +144,14 @@ cookies for Lightpanda:
 
 ```sh
 .venv/bin/python web_inference.py --provider gemini --login
+.venv/bin/python web_inference.py --provider qwen --login
 ```
 
 Sign in on the KDE desktop and select the configured model and thinking level.
-For Gemini, keep the window open after the helper reports that it is ready; it
-hands that exact session to Seth. Other providers close normally unless their
-`keep_browser_open` setting is enabled. The cookie export is saved immediately.
+For Gemini and Qwen, keep the window open after the helper reports that it is
+ready; it hands that exact session to Seth. Minimizing the window is supported.
+Other providers close normally unless their `keep_browser_open` setting is
+enabled. The cookie export is saved immediately.
 For another installed executable, add
 `--login-browser /path/to/chromium` and set the same executable in configuration.
 Lightpanda itself needs no desktop browser during inference.
@@ -171,9 +178,8 @@ Netscape cookies without pasting session secrets into chat:
 ```
 
 The image command uploads to exactly the named provider and prints a validated
-decision; it never sends VM input. Substitute `chatgpt` or `qwen` to set up and
-test another site. Cookies are filtered to that provider's domains and stored in
-private files under `~/.local/share/seth/web/<provider>/`. Updated cookies are
+decision; it never sends VM input. Cookies are filtered to that provider's domains
+and stored in private files under `~/.local/share/seth/web/<provider>/`. Updated cookies are
 saved atomically after successful operations when time and cancellation allow.
 Failed operations preserve the imported session. Cookie import does not
 guarantee that a website will accept the session; reauthentication,
@@ -206,8 +212,8 @@ Lightpanda's support for file inputs does not prove compatibility with every
 site's upload preprocessing or JavaScript. Tests with both real engines verify a local
 PNG upload byte for byte, cookie restoration across browser restarts, complete
 answer extraction, cancellation, and failure handling. Gemini screenshot inference
-has also passed live checks using the persistent Chromium session. ChatGPT and
-Qwen still require account setup and independent live checks; see
+has also passed live checks using the persistent Chromium session. Qwen is not
+an operational fallback, and ChatGPT web integration has been withdrawn; see
 [the validation record](docs/lightpanda-validation.md).
 
 Run the offline integration suites with installed browser engines:

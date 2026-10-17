@@ -1,5 +1,28 @@
 # Development milestones
 
+## 2026-10-16 — Qwen screenshot fallback
+
+- Enabled Qwen3.8-Omni-Flash with Thinking after Gemini in the web fallback order.
+  The native Qwen profile restored its sign-in after reopening.
+- Added Qwen's per-upload menu preparation, filename and upload-progress checks,
+  separate model/thinking verification, and final-answer extraction that excludes
+  thinking. Temporary anonymous UI during account loading no longer immediately
+  reports a lost session. Native chooser targets handle changing page inputs;
+  file-chooser cleanup survives deadlines/cancellation.
+- Qwen now requests original pixel coordinates after normalized-grid table probes
+  exposed a scaling error. Four consecutive live requests passed for single-choice,
+  MCMA, and tables at two aspect ratios, including points within all target controls.
+  Repeated uploads of the same file are covered. A controlled Gemini login
+  failure fell back to a real Qwen response. The VM was off, so no Qwen VM click
+  cycle was run. See `docs/qwen-validation.md` for measurements and limitations.
+- Removed ChatGPT from configured providers and retained the existing API backend.
+- All 121 tests passed with Lightpanda, Chromium, and native-login integration
+  enabled. The configured Gemini-to-Qwen path also passed against the actual
+  Gemini sign-in failure and a live Qwen screenshot response in 24.59 seconds.
+- Investigated Google login persistence: synthetic native cookies survive
+  restarts, but Google's authentication cookies selectively disappeared. The
+  cause remains unresolved; keeping the live Gemini session is still a workaround.
+
 ## 2026-10-16 — Shortcut remapping
 
 - Changed the answer-cycle shortcut to Ctrl+D+F and the overlay toggle to

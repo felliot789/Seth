@@ -22,7 +22,7 @@
   },
   "min_confidence": 0.85,
   "web": {
-    "providers": ["gemini", "chatgpt", "qwen"],
+    "providers": ["gemini", "qwen"],
     "timeout_seconds": 240,
     "attempt_timeout_seconds": 150,
     "sites": {
@@ -32,11 +32,11 @@
         "model_label": "Argon",
         "thinking_label": "Medium"
       },
-      "chatgpt": {
-        "model_label": ""
-      },
       "qwen": {
-        "model_label": ""
+        "engine": "chromium",
+        "keep_browser_open": true,
+        "model_label": "Qwen3.8-Omni-Flash",
+        "thinking_label": "Thinking"
       }
     }
   }
