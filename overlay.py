@@ -13,6 +13,7 @@ COLORS = {
     "no_action": "#fb923c", "low_confidence": "#fb923c",
     "error": "#f87171", "cancelled": "#94a3b8",
 }
+TEXT_COLORS = {"white": "#ffffff", "black": "#000000"}
 
 
 def check_display(platform):
@@ -58,14 +59,14 @@ class SethOverlay:
         self.panel = panel = QWidget(self.window)
         panel.setGeometry(0, 0, 336, 38)
         panel.setObjectName("statusPanel")
-        panel.setStyleSheet("#statusPanel { background: rgba(20, 25, 36, 235); "
-                            "border: 1px solid #374151; border-radius: 12px; }")
+        panel.setStyleSheet("#statusPanel { background: transparent; border: none; }")
         self.dot = QLabel(self.window)
-        self.dot.setFixedSize(10, 10)
+        self.dot.setFixedSize(5, 5)
         self.label = QLabel(panel)
         self.label.setGeometry(13, 0, 294, 38)
         self.label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.label.setStyleSheet("color: #e5e7eb; font-size: 12px; font-weight: 500; background: transparent;")
+        self.text_color = "white"
+        self._apply_text_color()
         self.progress = None
         self.display_mode = "full"
         self.update(("idle", "Idle"))
@@ -83,7 +84,7 @@ class SethOverlay:
             self.progress = progress
             self.progress_started = time.monotonic()
             state, label = progress
-            self.dot.setStyleSheet("border-radius: 5px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
+            self.dot.setStyleSheet("border-radius: 2px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
         state, label = progress
         if state == "thinking":
             elapsed = max(0, int(time.monotonic() - self.progress_started))
@@ -105,7 +106,7 @@ class SethOverlay:
         self.window.setFixedSize(336 if full else 32, 38)
         self.panel.setVisible(full)
         # The dot's screen position is identical in Full and Dot modes.
-        self.dot.move(self.window.width() - 21, 14)
+        self.dot.move(self.window.width() - 19, 16)
         if self.visible:
             self.place()
             self.window.show()
@@ -117,6 +118,16 @@ class SethOverlay:
         self._apply_mode()
         self.app.processEvents()
         return self.display_mode
+
+    def _apply_text_color(self):
+        self.label.setStyleSheet("color: " + TEXT_COLORS[self.text_color]
+                                + "; font-size: 12px; font-weight: 500; background: transparent; border: none;")
+
+    def toggle_text_color(self):
+        self.text_color = "black" if self.text_color == "white" else "white"
+        self._apply_text_color()
+        self.app.processEvents()
+        return self.text_color
 
     def stop(self):
         self.window.close()

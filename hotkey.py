@@ -1,4 +1,4 @@
-"""Linux run, indicator, provider, and capture chords, including on Wayland."""
+"""Linux run, indicator, text-color, provider, and capture chords, including on Wayland."""
 
 import logging
 import select
@@ -11,6 +11,7 @@ CTRL = {29, 97}
 SHIFT = {42, 54}
 LETTERS = {32, 33}  # D, F
 SELECT_LETTERS = {18, 19}  # E, R
+COLOR_LETTERS = {16, 17}  # Q, W
 
 
 class ChordFilter:
@@ -20,7 +21,7 @@ class ChordFilter:
     Holding keys, autorepeat, or an incomplete chord never queues extra cycles.
     """
 
-    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False):
+    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False, enable_text_color=False):
         self.down = set()
         self.pending = []
         self.pending_group = None
@@ -32,8 +33,21 @@ class ChordFilter:
         if enable_provider or enable_capture:
             self.bindings[frozenset(SELECT_LETTERS)] = (
                 "provider" if enable_provider else None, "capture" if enable_capture else None)
+        if enable_text_color:
+            self.bindings[frozenset(COLOR_LETTERS)] = (None, "text_color")
         self.letters = set().union(*self.bindings)
         self.chord_keys = CTRL | SHIFT | self.letters
+
+    def _match_pending(self, group, action):
+        # Shift may arrive between the letters of a Shift-only binding. Keep
+        # its original order if the chord is incomplete, or forward only the
+        # modifiers once the completed letter chord is consumed.
+        modifiers = [event for event in self.pending if event[0] in SHIFT]
+        self.pending.clear()
+        self.pending_group = None
+        self.matched_group = set(group)
+        self.matched = action
+        return modifiers
 
     def feed(self, code, value):
         if value == 1:
@@ -60,21 +74,28 @@ class ChordFilter:
                 self.cancelled = self.blocked = False
             return output, fired
 
+        if (self.pending_group and code in SHIFT and value in (0, 1)
+                and self.bindings[self.pending_group][0] is None
+                and self.down & CTRL and self.down <= CTRL | SHIFT | self.pending_group):
+            self.pending.append((code, value))
+            if (self.down & SHIFT and self.pending_group <= self.down):
+                group = self.pending_group
+                output.extend(self._match_pending(group, self.bindings[group][1]))
+            return output, False
+
         group = next((keys for keys in self.bindings if code in keys), None)
         shifted = bool(self.down & SHIFT)
         action = self.bindings[group][int(shifted)] if group else None
-        if (not self.blocked and group and action and self.down & CTRL
+        can_delay = group and (action or self.bindings[group][0] is None and self.bindings[group][1])
+        if (not self.blocked and can_delay and self.down & CTRL
                 and self.down <= CTRL | SHIFT | group
                 and self.pending_group in (None, group) and value in (1, 2)):
             # Autorepeat isn't a second press; don't accumulate repeated events.
             if value == 1:
                 self.pending.append((code, value))
                 self.pending_group = group
-            if group <= {key for key, _ in self.pending}:
-                self.pending.clear()
-                self.pending_group = None
-                self.matched_group = set(group)
-                self.matched = action
+            if action and group <= {key for key, _ in self.pending}:
+                output.extend(self._match_pending(group, action))
             return output, False
 
         # An incomplete chord remains an ordinary Ctrl+D or Ctrl+F shortcut.
@@ -91,11 +112,13 @@ class ChordFilter:
 
 
 class SethHotkey:
-    def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, capture_callback=None):
+    def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, capture_callback=None,
+                 text_color_callback=None):
         self.callback = callback
         self.toggle_callback = toggle_callback
         self.provider_callback = provider_callback
         self.capture_callback = capture_callback
+        self.text_color_callback = text_color_callback
         self.paths = devices
         self.devices = []
 
@@ -117,6 +140,8 @@ class SethHotkey:
                     keys = set(caps.get(evdev.ecodes.EV_KEY, []))
                     # Skip mice advertising keyboard keys and our own virtual devices.
                     required = LETTERS | (SELECT_LETTERS if self.provider_callback or self.capture_callback else set())
+                    if self.text_color_callback is not None:
+                        required |= COLOR_LETTERS
                     if (device.name.startswith("Seth shortcut") or not required <= keys
                             or not keys & CTRL or (self.paths is None and evdev.ecodes.EV_REL in caps)):
                         continue
@@ -127,7 +152,8 @@ class SethHotkey:
                     self.devices.append((device, virtual, ChordFilter(
                         enable_toggle=self.toggle_callback is not None,
                         enable_provider=self.provider_callback is not None,
-                        enable_capture=self.capture_callback is not None)))
+                        enable_capture=self.capture_callback is not None,
+                        enable_text_color=self.text_color_callback is not None)))
                     LOG.info("Shortcut keyboard: %s (%s)", device.name, path)
                     device = virtual = None
                 finally:
@@ -166,6 +192,9 @@ class SethHotkey:
                     if fired == "toggle":
                         self.toggle_callback()
                         LOG.info("Ctrl+Shift+D+F: indicator display cycled")
+                    elif fired == "text_color":
+                        color = self.text_color_callback()
+                        LOG.info("Ctrl+Shift+Q+W: indicator text is %s", color)
                     elif fired == "provider":
                         accepted = self.provider_callback()
                         LOG.info("Ctrl+E+R: %s", "provider changed" if accepted else "busy; switch discarded")

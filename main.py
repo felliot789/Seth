@@ -285,7 +285,7 @@ def main():
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
     parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
     parser.add_argument("--hotkey", action="store_true", help="Enable run, provider, and capture shortcuts in listen mode (starts API / Single)")
-    parser.add_argument("--overlay", action="store_true", help="Show a host indicator; Ctrl+Shift+D+F cycles Hidden / Dot / Full (requires --hotkey)")
+    parser.add_argument("--overlay", action="store_true", help="Show a host indicator; Ctrl+Shift+D+F cycles modes, Ctrl+Shift+Q+W toggles text color (requires --hotkey)")
     parser.add_argument("--delay", type=float, default=0,
                         help="Wait this many seconds before sending a host trigger")
     args = parser.parse_args()
@@ -347,7 +347,8 @@ def main():
             if args.hotkey:
                 hotkey = SethHotkey(engine.request_cycle, config.get("hotkey", {}).get("devices"),
                                     toggle_callback=overlay.toggle if overlay is not None else None,
-                                    provider_callback=engine.cycle_provider, capture_callback=engine.toggle_capture)
+                                    provider_callback=engine.cycle_provider, capture_callback=engine.toggle_capture,
+                                    text_color_callback=overlay.toggle_text_color if overlay is not None else None)
             if hotkey is not None:
                 hotkey.start()
             LOG.info("Host listener ready (%s). Run: python3 main.py --mode trigger", "clicks enabled" if args.execute else "dry run")
@@ -356,7 +357,8 @@ def main():
                 LOG.info("Ctrl+E+R cycles API / Gemini / Qwen; Ctrl+Shift+E+R toggles Single / Scroll. Selected: %s", engine.indicator_selection)
             if overlay is not None:
                 overlay.poll(engine.progress, engine.indicator_selection)
-                LOG.info("Host indicator ready (Full). Ctrl+Shift+D+F cycles Hidden / Dot / Full.")
+                LOG.info("Host indicator ready (Full, white text). Ctrl+Shift+D+F cycles Hidden / Dot / Full; "
+                         "Ctrl+Shift+Q+W toggles white / black text.")
 
             def poll():
                 if hotkey is not None:

@@ -24,9 +24,10 @@ and answer selection. Start the Windows VM separately and open a question.
 | **Ctrl+E+R** | Cycle API → Gemini → Qwen → API |
 | **Ctrl+Shift+E+R** | Toggle Single ↔ Scroll capture |
 | **Ctrl+Shift+D+F** | Cycle Hidden → Dot-only → Full → Hidden |
+| **Ctrl+Shift+Q+W** | Toggle indicator text White ↔ Black |
 
 Hold the modifiers, press both letters together in either order, then release
-all keys. Startup defaults are **API · Single · Full**. Provider and capture
+all keys. Startup defaults are **API · Single · Full**, with white text. Provider and capture
 changes only apply while idle; busy presses are discarded. Switching sends no
 inference request, and uncertainty does not automatically change providers.
 Check startup with `systemctl --user status seth-listener --no-pager` and
@@ -319,11 +320,11 @@ Omit `--execute` to test inference without selecting answers.
 Provider and capture selection are independent and persist between questions.
 Ctrl+Shift+E+R enables scroll capture only when needed; toggle back for a question
 that fits in one screenshot. Ctrl+E+R changes the provider without capturing,
-uploading, or selecting anything. All four shortcuts fire on release.
+uploading, or selecting anything. All five shortcuts fire on release.
 
 The Linux shortcut uses [python-evdev](https://python-evdev.readthedocs.io/en/stable/usage.html)
 and works independently of desktop focus, including on Wayland. It consumes the
-D/F and E/R chords so they do not activate the guest's individual shortcuts.
+D/F, E/R, and the shifted Q/W chords so they do not activate the guest's individual shortcuts.
 Incomplete chords pass through when released. Ctrl+P and Ctrl+O pass through normally.
 Release all keys before starting.
 Stop with Ctrl+C; the keyboard grab and virtual keyboard are released on exit.
@@ -352,9 +353,14 @@ Add `--overlay` for a small status indicator at the top-right of the host deskto
 
 **Ctrl+Shift+D+F** cycles **Hidden → Dot-only → Full → Hidden**; it never requests
 a cycle. The listener starts in Full mode, so the first press hides it. Dot-only
-shows a single small colored circle with no text or panel. The dot stays in the
+shows a single 5-pixel colored circle with no text or panel. The dot stays in the
 same screen position in Full and Dot-only modes, and status changes never expand
-it. Full mode also shows the selected provider, Single/Scroll, and current status.
+it. Full mode also shows the selected provider, Single/Scroll, and current status
+as bare text, with a transparent background and no border or highlight.
+**Ctrl+Shift+Q+W** toggles that text between white and black. It works while busy
+and in every display mode; changing visibility or status preserves the color
+choice. Text starts white each time the listener starts. The dot retains its
+status color independently of the text.
 
 | Dot color | Status |
 | --- | --- |
@@ -420,7 +426,7 @@ after code/config changes, or `systemctl --user stop seth-listener` to stop it f
 this session. To disable automatic startup, use
 `systemctl --user disable --now seth-listener`. Start no second listener while the
 service is running. A newly started listener resets to API, Single capture,
-and the Full indicator.
+and the Full indicator with white text.
 If KDE's display is still starting, the service retries until it can open the
 overlay. A process lock prevents duplicate listeners; an abandoned socket from a
 crash is recovered automatically after verifying that it has no live listener.

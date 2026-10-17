@@ -182,13 +182,14 @@ class HotkeyTests(unittest.TestCase):
         finally:
             hotkey.stop()
 
-    def test_all_four_actions_dispatch_only_to_their_own_callback(self):
-        self.device.capabilities.return_value = {1: [18, 19, 32, 33, 29, 42]}
-        run, indicator, provider, capture = (Mock(return_value=True) for _ in range(4))
-        hotkey = SethHotkey(run, toggle_callback=indicator, provider_callback=provider, capture_callback=capture)
+    def test_all_five_actions_dispatch_only_to_their_own_callback(self):
+        self.device.capabilities.return_value = {1: [16, 17, 18, 19, 32, 33, 29, 42]}
+        run, indicator, provider, capture, text_color = (Mock(return_value=True) for _ in range(5))
+        hotkey = SethHotkey(run, toggle_callback=indicator, provider_callback=provider, capture_callback=capture,
+                           text_color_callback=text_color)
         hotkey.start()
         events = []
-        for letters, shifted in (((32, 33), False), ((32, 33), True), ((18, 19), False), ((18, 19), True)):
+        for letters, shifted in (((32, 33), False), ((32, 33), True), ((18, 19), False), ((18, 19), True), ((16, 17), True)):
             modifiers = [29] + ([42] if shifted else [])
             events += [(key, 1) for key in modifiers + list(letters)]
             events += [(key, 0) for key in reversed(modifiers + list(letters))]
@@ -196,11 +197,61 @@ class HotkeyTests(unittest.TestCase):
         try:
             with patch('hotkey.select.select', return_value=([self.device], [], [])):
                 hotkey.poll()
-            for callback in (run, indicator, provider, capture):
+            for callback in (run, indicator, provider, capture, text_color):
                 callback.assert_called_once_with()
             self.assertTrue(all(call.args[1] in (29, 42) for call in self.virtual.write.call_args_list))
         finally:
             hotkey.stop()
+
+
+class TextColorChordTests(unittest.TestCase):
+    def replay(self, events, enabled=True):
+        chord = ChordFilter(enable_text_color=enabled)
+        output, actions = [], []
+        for index, event in enumerate(events):
+            forwarded, action = chord.feed(*event)
+            output.extend(forwarded)
+            if action:
+                actions.append((index, action))
+        return output, actions
+
+    def test_modifier_orders_letter_orders_and_repeats_trigger_once_on_release(self):
+        for ctrl in (29, 97):
+            for shift in (42, 54):
+                for modifiers in ((ctrl, shift), (shift, ctrl)):
+                    for first, second in ((16, 17), (17, 16)):
+                        events = ([(key, 1) for key in modifiers] + [(first, 1), (first, 2), (second, 1), (second, 2),
+                                  (ctrl, 0), (first, 0), (second, 0), (shift, 0)])
+                        with self.subTest(events=events):
+                            output, actions = self.replay(events)
+                            self.assertEqual(output, [event for event in events if event[0] in modifiers])
+                            self.assertEqual(actions, [(len(events) - 1, 'text_color')])
+
+    def test_shift_can_arrive_between_or_after_both_letters(self):
+        for middle in ([(16, 1), (54, 1), (17, 1)], [(16, 1), (17, 1), (54, 1)]):
+            events = [(29, 1)] + middle + [(54, 0), (17, 0), (16, 0), (29, 0)]
+            self.assertEqual(self.replay(events), ([(29, 1), (54, 1), (54, 0), (29, 0)], [(7, 'text_color')]))
+
+    def test_unshifted_partial_mixed_and_disabled_chords_preserve_original_event_order(self):
+        cases = [
+            [(29, 1), (16, 1), (17, 1), (17, 0), (16, 0), (29, 0)],
+            [(29, 1), (42, 1), (16, 1), (16, 0), (42, 0), (29, 0)],
+            [(29, 1), (16, 1), (54, 1), (54, 0), (16, 0), (29, 0)],
+            [(29, 1), (16, 1), (54, 1), (54, 0), (17, 1), (17, 0), (16, 0), (29, 0)],
+            [(29, 1), (16, 1), (54, 1), (18, 1), (18, 0), (16, 0), (54, 0), (29, 0)],
+            [(56, 1), (29, 1), (42, 1), (16, 1), (17, 1), (17, 0), (16, 0), (42, 0), (29, 0), (56, 0)],
+        ]
+        for events in cases:
+            with self.subTest(events=events):
+                self.assertEqual(self.replay(events), (events, []))
+        events = [(29, 1), (42, 1), (16, 1), (17, 1), (17, 0), (16, 0), (42, 0), (29, 0)]
+        self.assertEqual(self.replay(events, enabled=False), (events, []))
+
+    def test_full_release_rearms_and_an_extra_key_cancels_a_completed_chord(self):
+        events = [(29, 1), (42, 1), (16, 1), (17, 1), (17, 0), (16, 0), (42, 0), (29, 0)]
+        self.assertEqual(self.replay(events * 2)[1], [(7, 'text_color'), (15, 'text_color')])
+        cancelled = events[:4] + [(30, 1), (30, 0)] + events[4:]
+        self.assertEqual(self.replay(cancelled)[1], [])
 
 
 class SelectionChordTests(unittest.TestCase):

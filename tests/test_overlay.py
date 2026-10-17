@@ -44,6 +44,8 @@ class OverlayTests(unittest.TestCase):
 
     def setUp(self):
         self.overlay.display_mode = 'full'
+        if self.overlay.text_color != 'white':
+            self.overlay.toggle_text_color()
         self.overlay._apply_mode()
         self.overlay.poll(('idle', 'Idle'))
 
@@ -74,9 +76,43 @@ class OverlayTests(unittest.TestCase):
                 self.assertEqual(overlay.window.width(), 32)
                 self.assertIn(COLORS[state], overlay.dot.styleSheet())
         image = overlay.window.grab().toImage()
+        self.assertEqual((overlay.dot.width(), overlay.dot.height()), (5, 5))
         self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
-        self.assertEqual(image.pixelColor(16, 19).name(), COLORS['error'])
+        self.assertEqual(image.pixelColor(15, 18).name(), COLORS['error'])
+        self.assertLess(image.pixelColor(13, 16).alpha(), 255)
+        self.assertEqual(image.pixelColor(12, 18).alpha(), 0)
+        self.assertEqual(image.pixelColor(18, 18).alpha(), 0)
         self.assertNotEqual(COLORS['thinking'], COLORS['low_confidence'])
+
+    def test_full_text_has_no_background_or_border_in_either_color(self):
+        overlay = self.overlay
+        for color in ('white', 'black'):
+            if overlay.text_color != color:
+                overlay.toggle_text_color()
+            overlay.poll(('done', 'Done'), 'Gemini · Scroll')
+            image = overlay.window.grab().toImage()
+            for point in ((0, 0), (0, 19), (100, 3), (100, 34), (312, 19), (335, 37)):
+                self.assertEqual(image.pixelColor(*point).alpha(), 0, (color, point))
+            ink = [image.pixelColor(x, y) for y in range(image.height()) for x in range(13, 307)
+                   if image.pixelColor(x, y).alpha() > 200]
+            self.assertTrue(ink)
+            self.assertTrue(all(pixel.name() == ('#ffffff' if color == 'white' else '#000000') for pixel in ink))
+
+    def test_text_color_toggle_preserves_display_mode_status_and_dot(self):
+        overlay = self.overlay
+        overlay.poll(('thinking', 'Waiting'), 'Qwen · Scroll')
+        progress, dot = overlay.progress, overlay.dot.styleSheet()
+        for mode in ('full', 'hidden', 'dot'):
+            overlay.display_mode = mode
+            overlay._apply_mode()
+            visible = overlay.window.isVisible()
+            for expected in ('black', 'white'):
+                self.assertEqual(overlay.toggle_text_color(), expected)
+                self.assertEqual(overlay.display_mode, mode)
+                self.assertEqual(overlay.window.isVisible(), visible)
+                self.assertEqual(overlay.progress, progress)
+                self.assertEqual(overlay.dot.styleSheet(), dot)
+                self.assertEqual(overlay.label.isVisible(), mode == 'full')
 
     def test_full_shows_both_selections_and_preserves_result_colour_on_a_switch(self):
         overlay = self.overlay

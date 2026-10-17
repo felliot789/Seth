@@ -1,5 +1,20 @@
 # Development milestones
 
+## 2026-10-17 — Smaller dot and bare indicator text
+
+- Halved the status dot's diameter from ten to five pixels in Full and Dot-only
+  modes, retaining its screen position and status colors.
+- Removed the text panel's black background and border. Full mode now renders
+  bare white text on a transparent window.
+- Ctrl+Shift+Q+W toggles the text between white and black, including while busy,
+  hidden, or in Dot-only mode. Preserve that choice across status/mode changes;
+  a newly started listener defaults to white.
+- Consume the new chord on full release, including late Shift presses and either
+  letter order. Incomplete/unshifted chords preserve their original event order.
+- All 64 focused overlay, keyboard, runtime-selection, and cycle tests passed.
+  Render checks confirm transparent Full-mode backgrounds, white/black glyphs,
+  and the five-pixel dot; keyboard checks cover all five independent actions.
+
 ## 2026-10-17 — Track independent panel nudges after selections
 
 - Diagnosed a two-column categorization stop after its first confirmed selection:
