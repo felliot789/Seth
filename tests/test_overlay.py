@@ -76,12 +76,12 @@ class OverlayTests(unittest.TestCase):
                 self.assertEqual(overlay.window.width(), 32)
                 self.assertIn(COLORS[state], overlay.dot.styleSheet())
         image = overlay.window.grab().toImage()
-        self.assertEqual((overlay.dot.width(), overlay.dot.height()), (5, 5))
+        self.assertEqual((overlay.dot.width(), overlay.dot.height()), (3, 3))
         self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
         self.assertEqual(image.pixelColor(15, 18).name(), COLORS['error'])
-        self.assertLess(image.pixelColor(13, 16).alpha(), 255)
-        self.assertEqual(image.pixelColor(12, 18).alpha(), 0)
-        self.assertEqual(image.pixelColor(18, 18).alpha(), 0)
+        self.assertLess(image.pixelColor(14, 17).alpha(), 255)
+        self.assertEqual(image.pixelColor(13, 18).alpha(), 0)
+        self.assertEqual(image.pixelColor(17, 18).alpha(), 0)
         self.assertNotEqual(COLORS['thinking'], COLORS['low_confidence'])
 
     def test_full_text_has_no_background_or_border_in_either_color(self):
@@ -151,8 +151,9 @@ class OverlayTests(unittest.TestCase):
     def test_indicator_is_noninteractive_and_does_not_request_activation(self):
         window = self.overlay.window
         for flag in (Qt.WindowType.WindowTransparentForInput, Qt.WindowType.WindowDoesNotAcceptFocus,
-                     Qt.WindowType.WindowStaysOnTopHint):
+                     Qt.WindowType.WindowStaysOnTopHint, Qt.WindowType.NoDropShadowWindowHint):
             self.assertTrue(window.windowFlags() & flag)
+        self.assertTrue(window.property("_KDE_NET_WM_SKIP_SHADOW"))
         self.assertTrue(window.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating))
         self.assertEqual(window.focusPolicy(), Qt.FocusPolicy.NoFocus)
 

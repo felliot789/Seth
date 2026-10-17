@@ -353,10 +353,11 @@ Add `--overlay` for a small status indicator at the top-right of the host deskto
 
 **Ctrl+Shift+D+F** cycles **Hidden → Dot-only → Full → Hidden**; it never requests
 a cycle. The listener starts in Full mode, so the first press hides it. Dot-only
-shows a single 5-pixel colored circle with no text or panel. The dot stays in the
+shows a single 3-pixel colored circle with no text or panel. The dot stays in the
 same screen position in Full and Dot-only modes, and status changes never expand
 it. Full mode also shows the selected provider, Single/Scroll, and current status
-as bare text, with a transparent background and no border or highlight.
+as bare text, with a transparent background and no border or highlight. The
+window also disables desktop tooltip shadows so no outline surrounds the text.
 **Ctrl+Shift+Q+W** toggles that text between white and black. It works while busy
 and in every display mode; changing visibility or status preserves the color
 choice. Text starts white each time the listener starts. The dot retains its
@@ -394,7 +395,7 @@ VM window's position or visibility. No overlay code runs in Windows, and the
 indicator is outside the guest framebuffer used by Seth's SDK capture.
 These properties do not establish anti-cheat compatibility or undetectability.
 
-This host uses a persistent `seth-listener` user service with all four shortcuts and
+This host uses a persistent `seth-listener` user service with all five shortcuts and
 the indicator enabled. It starts when you log into the graphical desktop and
 stops on logout. It waits for your shortcut; startup does not request a cycle.
 The VM must be running before you request an answer cycle.

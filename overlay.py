@@ -49,8 +49,11 @@ class SethOverlay:
         self.app.setQuitOnLastWindowClosed(False)
         flags = (Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
                  | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowTransparentForInput
-                 | Qt.WindowType.WindowDoesNotAcceptFocus)
+                 | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint)
         self.window = QWidget(None, flags)
+        # Breeze adds compositor shadow tiles to tooltips even with transparent
+        # content. Opt out before the style polishes/creates the native window.
+        self.window.setProperty("_KDE_NET_WM_SKIP_SHADOW", True)
         self.window.setWindowTitle("Seth status")
         self.window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -61,7 +64,7 @@ class SethOverlay:
         panel.setObjectName("statusPanel")
         panel.setStyleSheet("#statusPanel { background: transparent; border: none; }")
         self.dot = QLabel(self.window)
-        self.dot.setFixedSize(5, 5)
+        self.dot.setFixedSize(3, 3)
         self.label = QLabel(panel)
         self.label.setGeometry(13, 0, 294, 38)
         self.label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -84,7 +87,7 @@ class SethOverlay:
             self.progress = progress
             self.progress_started = time.monotonic()
             state, label = progress
-            self.dot.setStyleSheet("border-radius: 2px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
+            self.dot.setStyleSheet("border-radius: 1px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
         state, label = progress
         if state == "thinking":
             elapsed = max(0, int(time.monotonic() - self.progress_started))
@@ -106,7 +109,7 @@ class SethOverlay:
         self.window.setFixedSize(336 if full else 32, 38)
         self.panel.setVisible(full)
         # The dot's screen position is identical in Full and Dot modes.
-        self.dot.move(self.window.width() - 19, 16)
+        self.dot.move(self.window.width() - 18, 17)
         if self.visible:
             self.place()
             self.window.show()

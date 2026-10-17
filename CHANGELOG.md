@@ -1,5 +1,16 @@
 # Development milestones
 
+## 2026-10-17 — Remove desktop shadow and reduce dot to three pixels
+
+- Disabled the window drop shadow and opted out of Breeze's tooltip shadow
+  before native window creation. The remaining glass-like outline was a desktop
+  shadow outside the already transparent Qt content.
+- Reduced the status dot from five to three pixels, keeping its center fixed
+  between Full and Dot-only modes.
+- All 64 focused overlay, keyboard, runtime-selection, and cycle tests passed.
+  A native XWayland/Breeze check confirmed no shadow, blur, or contrast effect
+  properties through Full, Hidden, Dot-only, and Full again; focus stays disabled.
+
 ## 2026-10-17 — Smaller dot and bare indicator text
 
 - Halved the status dot's diameter from ten to five pixels in Full and Dot-only
