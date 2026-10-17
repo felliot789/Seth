@@ -7,7 +7,7 @@ try:
 except ImportError:
     Qt = None
 
-from overlay import SethOverlay, check_display
+from overlay import COLORS, SethOverlay, check_display
 from trigger import TriggerError
 
 
@@ -41,6 +41,50 @@ class OverlayTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.overlay.stop()
+
+    def setUp(self):
+        self.overlay.display_mode = 'full'
+        self.overlay._apply_mode()
+        self.overlay.poll(('idle', 'Idle'))
+
+    def test_full_hidden_dot_full_cycle_keeps_the_dot_at_the_same_corner(self):
+        overlay = self.overlay
+        full_center = overlay.dot.mapToGlobal(overlay.dot.rect().center())
+        self.assertEqual(overlay.toggle(), 'hidden')
+        self.assertFalse(overlay.window.isVisible())
+        self.assertEqual(overlay.toggle(), 'dot')
+        self.assertTrue(overlay.window.isVisible())
+        self.assertTrue(overlay.dot.isVisible())
+        self.assertFalse(overlay.panel.isVisible())
+        self.assertFalse(overlay.label.isVisible())
+        self.assertEqual(overlay.dot.mapToGlobal(overlay.dot.rect().center()), full_center)
+        self.assertEqual(overlay.toggle(), 'full')
+        self.assertTrue(overlay.label.isVisible())
+
+    def test_dot_stays_text_free_and_updates_colours_without_expanding(self):
+        overlay = self.overlay
+        overlay.toggle()
+        overlay.toggle()
+        for state in ('capturing', 'thinking', 'selecting', 'done', 'low_confidence', 'no_action', 'error'):
+            with self.subTest(state=state):
+                overlay.poll((state, state), 'Gemini · Scroll')
+                self.assertEqual(overlay.display_mode, 'dot')
+                self.assertFalse(overlay.label.isVisible())
+                self.assertFalse(overlay.panel.isVisible())
+                self.assertEqual(overlay.window.width(), 32)
+                self.assertIn(COLORS[state], overlay.dot.styleSheet())
+        image = overlay.window.grab().toImage()
+        self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+        self.assertEqual(image.pixelColor(16, 19).name(), COLORS['error'])
+        self.assertNotEqual(COLORS['thinking'], COLORS['low_confidence'])
+
+    def test_full_shows_both_selections_and_preserves_result_colour_on_a_switch(self):
+        overlay = self.overlay
+        overlay.poll(('done', 'Done'), 'API · Single')
+        colour = overlay.dot.styleSheet()
+        overlay.poll(('done', 'Done'), 'Qwen · Scroll')
+        self.assertEqual(overlay.label.text(), 'Seth · Qwen · Scroll · Done')
+        self.assertEqual(overlay.dot.styleSheet(), colour)
 
     def test_visibility_toggle_preserves_latest_progress_without_showing(self):
         overlay = self.overlay

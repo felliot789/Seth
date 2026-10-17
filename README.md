@@ -15,9 +15,20 @@ start the whole application manually, run this from any directory:
 systemctl --user start seth-listener
 ```
 
-That one service starts the listener, both keyboard shortcuts, the host overlay,
-and answer selection. Start the Windows VM separately, open a question, then
-press and release **Ctrl+D+F**. **Ctrl+Shift+D+F** shows/hides the overlay.
+That one service starts the listener, keyboard shortcuts, host indicator,
+and answer selection. Start the Windows VM separately and open a question.
+
+| Shortcut | Action |
+| --- | --- |
+| **Ctrl+D+F** | Capture and answer the current question once |
+| **Ctrl+E+R** | Cycle API → Gemini → Qwen → API |
+| **Ctrl+Shift+E+R** | Toggle Single ↔ Scroll capture |
+| **Ctrl+Shift+D+F** | Cycle Hidden → Dot-only → Full → Hidden |
+
+Hold the modifiers, press both letters together in either order, then release
+all keys. Startup defaults are **API · Single · Full**. Provider and capture
+changes only apply while idle; busy presses are discarded. Switching sends no
+inference request, and uncertainty does not automatically change providers.
 Check startup with `systemctl --user status seth-listener --no-pager` and
 `journalctl --user -b -u seth-listener -n 20 --no-pager`. Use
 `systemctl --user restart seth-listener` after code or `.env` changes, and
@@ -101,8 +112,9 @@ still applies; surrounding prose and multiple JSON fragments are rejected.
 Seth also has a web backend for sending the captured PNG to a model's web chat.
 Its Python controller drives either Lightpanda or an installed Chromium/Chrome
 directly over CDP. It needs no standby AI agent, Playwright, or Node. This host now
-uses Gemini web by default after three controlled screenshot tests and a real VM
-dry cycle passed. Set `inference.backend` to `"api"` to restore API inference.
+supports Gemini and Qwen with separate authenticated sessions. The hotkey
+listener starts with API and selects one provider at a time. Outside hotkey mode,
+`inference.backend` selects the backend for foreground or socket-only runs.
 
 Install the controller:
 
@@ -127,8 +139,15 @@ system packages. Each downloaded version has its SHA-256 recorded in
 `release.json`; `current` selects the installed version. Startup never downloads
 or updates the browser. Set `web.executable_path` to pin a specific binary.
 
-The configured provider order is Gemini (Argon / Medium), then Qwen
-(Qwen3.8-Omni-Flash / Thinking). Both use dedicated persistent Chromium profiles.
+The manual web choices are Gemini (Argon / Medium) and Qwen
+(Qwen3.8-Omni-Flash / Thinking). This host keeps them in separate tabs of the
+same persistent Chromium window. Gemini sets `browser_profile: "qwen"` to use
+that native profile, with a separate private endpoint record selecting its tab.
+The default profile is the provider's own directory. Closing a shared window
+closes both providers' tabs; leave it open or minimized between requests.
+`web.providers` controls only nonmanual runs; this checkout currently configures
+Qwen there for the practice-question observation run. The hotkey listener uses
+exactly the provider selected with Ctrl+E+R.
 Each site needs its own sign-in session and the visible label of the selected
 vision model in `web.sites.<provider>.model_label`. Qwen also verifies its separate
 thinking control. Its screenshot uploads, single-choice and MCMA answers, repeated
@@ -189,8 +208,10 @@ device-bound sessions, and additional browser storage may require further work.
 label without uploading a screenshot. `web.sites.gemini.thinking_label` is
 `"Medium"` on this host. Run a Seth dry cycle with
 `.venv/bin/python main.py --backend web`. `INFERENCE_BACKEND=web`
-or `inference.backend: "web"` selects the same backend persistently. Use `api`
-to restore API inference. Restart the listener after configuration changes.
+or `inference.backend: "web"` selects the same backend for nonmanual runs. The
+hotkey listener starts at API regardless of that saved setting. An explicit
+`--backend` argument can override its initial choice. Restart after configuration
+changes; manual selections last until the listener restarts.
 
 Each attempt starts an empty chat using the site's new-chat control when reusing
 a live session, and requires an attachment matching the PNG's filename,
@@ -198,12 +219,14 @@ upload completion, the configured model, the current request's user message,
 and a completed answer. A one-second stable answer and absence of a generation
 control supplement the completion signal. The shared JSON, confidence, geometry,
 capture-age, and target checks still apply. A provider is tried at most once per
-cycle; errors can fall through to the next configured provider, and only the
-first valid answer reaches the clicker. An explicit `action: "none"` is accepted
-as an abstention rather than triggering more requests.
+cycle. Nonmanual web runs can fall through to the next configured provider on
+errors, and only the first valid answer reaches the clicker. The hotkey listener
+never falls through: change providers yourself and trigger again. An explicit
+`action: "none"` is accepted as an abstention.
 
 `web.timeout_seconds` is the total fallback budget (240 by default).
-`web.attempt_timeout_seconds` caps an individual attempt (150 by default).
+`web.attempt_timeout_seconds` caps an individual attempt (150 by default;
+240 in this checkout).
 Fallback never resets the total budget or the screenshot's original age. The
 overlay reports the current provider, upload, wait, and web errors. Results record
 the successful provider and preceding attempt error codes without session data.
@@ -265,10 +288,15 @@ shortcut again for another question. Holding the chord does not repeat it;
 requests received while busy are discarded. Answer correctness is not guaranteed.
 Omit `--execute` to test inference without selecting answers.
 
+Provider and capture selection are independent and persist between questions.
+Ctrl+Shift+E+R enables scroll capture only when needed; toggle back for a question
+that fits in one screenshot. Ctrl+E+R changes the provider without capturing,
+uploading, or selecting anything. All four shortcuts fire on release.
+
 The Linux shortcut uses [python-evdev](https://python-evdev.readthedocs.io/en/stable/usage.html)
 and works independently of desktop focus, including on Wayland. It consumes the
-D/F chord so it does not activate the guest's individual shortcuts. A lone Ctrl+D
-or Ctrl+F is passed through when released. Ctrl+P and Ctrl+O pass through normally.
+D/F and E/R chords so they do not activate the guest's individual shortcuts.
+Incomplete chords pass through when released. Ctrl+P and Ctrl+O pass through normally.
 Release all keys before starting.
 Stop with Ctrl+C; the keyboard grab and virtual keyboard are released on exit.
 If a keyboard disconnects or input events are lost, restart the listener.
@@ -294,10 +322,25 @@ Add `--overlay` for a small status indicator at the top-right of the host deskto
 .venv/bin/python main.py --mode listen --execute --hotkey --overlay
 ```
 
-**Ctrl+Shift+D+F** shows or hides the indicator; it never requests a cycle.
-Hold the modifiers before D/F, then release all keys. **Ctrl+D+F** still requests
-one cycle. The indicator reports capturing, waiting with elapsed time, selecting,
-done, or error. A connection/response timeout is labeled `API timeout`.
+**Ctrl+Shift+D+F** cycles **Hidden → Dot-only → Full → Hidden**; it never requests
+a cycle. The listener starts in Full mode, so the first press hides it. Dot-only
+shows a single small colored circle with no text or panel. The dot stays in the
+same screen position in Full and Dot-only modes, and status changes never expand
+it. Full mode also shows the selected provider, Single/Scroll, and current status.
+
+| Dot color | Status |
+| --- | --- |
+| Gray | Idle or cancelled |
+| Blue | Capturing or scrolling; dry-run ready |
+| Yellow | Waiting for inference |
+| Purple | Selecting |
+| Green | Done |
+| Orange | Uncertain or no selection |
+| Red | Error |
+
+The last result color remains until the next answer cycle, including when you
+change provider or capture mode. Hold the modifiers before the letters, then
+release all keys. A connection/response timeout is labeled `API timeout`.
 Logs record when the inference POST starts and when its response arrives.
 `api.stream` is enabled in the supplied configuration so response events and
 heartbeats can keep the tunnel connection active during inference. Seth waits
@@ -317,7 +360,7 @@ VM window's position or visibility. No overlay code runs in Windows, and the
 indicator is outside the guest framebuffer used by Seth's SDK capture.
 These properties do not establish anti-cheat compatibility or undetectability.
 
-This host uses a persistent `seth-listener` user service with both shortcuts and
+This host uses a persistent `seth-listener` user service with all four shortcuts and
 the indicator enabled. It starts when you log into the graphical desktop and
 stops on logout. It waits for your shortcut; startup does not request a cycle.
 The VM must be running before you request an answer cycle.
@@ -348,7 +391,8 @@ Check with `systemctl --user status seth-listener` and follow progress with
 after code/config changes, or `systemctl --user stop seth-listener` to stop it for
 this session. To disable automatic startup, use
 `systemctl --user disable --now seth-listener`. Start no second listener while the
-service is running. A newly started listener always shows the indicator.
+service is running. A newly started listener resets to API, Single capture,
+and the Full indicator.
 If KDE's display is still starting, the service retries until it can open the
 overlay. A process lock prevents duplicate listeners; an abandoned socket from a
 crash is recovered automatically after verifying that it has no live listener.
@@ -370,7 +414,7 @@ cancels clicking that has not been dispatched. After an unclean shutdown, the
 next listener automatically recovers its abandoned socket. It refuses to replace
 a socket with a live listener or any unrelated file.
 
-For the Gemini and API default prompts, the model returns a point on a 0..1000
+For Gemini and API Single capture with the default prompt, the model returns a point on a 0..1000
 grid over the entire screenshot, explicitly
 declaring `coordinate_space: "normalized_1000"`. Seth converts it to actual guest
 pixels locally. Explicit `"pixels"` decisions are also accepted; a missing or
@@ -394,8 +438,37 @@ and checkboxes 12–34 pixels across on a sufficiently uniform background.
 After each Qwen click, a fresh capture must show the control's interior selected;
 otherwise the cycle stops without retrying the click. Confirmed clicks include
 `selection_verified: true` in the result. This verifies selection, not correctness.
+Before confirming a grounded selection, Seth moves the guest pointer without
+pressing any button to the left screen margin. This clears row hover shading
+before the strict visual check. Scroll capture uses the same pointer position
+for its final baseline. A failed confirmation still stops the plan without a
+second click. Partial-plan errors retain the inferred decision and confidence.
 Explicit custom Qwen coordinate prompts instead use a conservative local check
 within 24 pixels of each predicted point; missing or ambiguous controls stop input.
+
+For long questions in this Windows quiz layout, **Ctrl+Shift+E+R** selects Scroll
+capture for API, Gemini, or Qwen. In nonmanual runs,
+`capture.scroll_context.enabled` enables the same collection. Seth collects
+overlapping sections from native inner-panel scrollbars before inference.
+`regions` specifies normalized rectangles for the question columns;
+`identity_box` covers the question header, excluding the changing timer.
+Each column finishes at its bottom. Earlier sections become reference crops
+above the current answer screenshot in one private PNG upload. Only the live
+answer view receives numbered controls, and its original VM pixel coordinates
+remain authoritative. The current configuration bounds collection to eight views.
+
+All three providers use numbered control IDs when receiving scroll context;
+Seth resolves them to original live-frame coordinates and confirms each selection
+in a fresh capture. API/Gemini Single capture retains its coordinate behavior.
+The collector requires a recognizable native gray scrollbar thumb and matching
+arrow buttons within the configured columns. It checks the question header and
+VM identity throughout capture, and the visible question/answer pixels before
+each selection, allowing changes around earlier confirmed controls. A changed
+view, uncertain scrollbar, failed endpoint, or excess capture count stops input.
+All required new answer controls must fit in the final live view. The model is asked
+to abstain if additional required answer rows remain outside that view; selection
+across several answer viewports is not implemented. The current three-row
+table fits in the final view even though its question does not.
 
 A table or multiple-answer plan must identify its type and provide unique row
 numbers or option labels. Every point is validated before the first click, and
@@ -412,7 +485,7 @@ threads. Each helper holds a shared VM session and releases it on completion.
 Input consists of a move, one left press held for 80 ms, and a release. The hold
 lets the guest's virtual input device observe the pressed state. Release is
 attempted even when pressing reports an error. Input errors are not retried,
-because completion may be uncertain. Outside the Qwen path, `clicked` confirms
+because completion may be uncertain. Outside Qwen and grounded scroll plans, `clicked` confirms
 SDK event delivery, not application acceptance. Screen content can change during
 inference even if display geometry stays constant. Start with a dry run.
 The prompt excludes login, navigation, next, and submit controls and allows

@@ -1,5 +1,74 @@
 # Development milestones
 
+## 2026-10-17 — Clear table hover before selection confirmation
+
+- Fixed API/Scroll stopping after one successful selection because the hovered
+  table row changed its background. Park the guest pointer with a button-free SDK
+  move before capturing the final scroll baseline and after each grounded click.
+  The strict visual checks and no-click-retry behavior remain in place.
+- Retain the inferred decision and confidence when a selection plan stops after
+  input. Added anonymous 40 × 40 control fixtures from the actual failed cycle.
+- Connected Gemini to the user's existing Argon/Medium tab beside Qwen in the
+  same Chromium window. `browser_profile` selects that shared native profile;
+  private endpoint records still identify the individual provider tabs.
+- Both real web sessions passed sign-in and selected-model checks. All 202 local
+  tests passed in 143.684 seconds with all browser/login integrations enabled.
+- A live Gemini context-only probe uploaded one combined PNG and returned the
+  correct badge `02` at confidence 1.0 in 14.709 seconds. Coordinates resolved to
+  the original answer frame, and the probe sent no VM answer input.
+
+## 2026-10-17 — Manual provider, capture, and indicator modes
+
+- Ctrl+E+R cycles API → Gemini → Qwen; Ctrl+Shift+E+R toggles Single/Scroll
+  capture independently. Switching sends no request. Busy switches are discarded,
+  and uncertainty never triggers another provider in the hotkey listener.
+- Listener startup resets to API, Single capture, and Full status. Full status
+  shows provider/capture selection while preserving the previous result color.
+- Ctrl+Shift+D+F cycles Hidden → Dot-only → Full → Hidden. Dot-only renders one
+  small colored circle with no text or panel, at the same position as Full mode's
+  dot. Orange means uncertain/no-selection; red means error.
+- Extended scroll-context uploads and local control-ID resolution to API and
+  Gemini, with the same fresh-frame selection confirmation used by Qwen.
+- Kept Ctrl+D+F as one explicit answer cycle. Provider/capture changes hold the
+  cycle lock through result logging, so the recorded source cannot change midway.
+- Updated the private 25-question ledger to retain provider-specific confidence
+  and distinguish completed selections from visually confirmed selections.
+- All 199 local tests passed in 140.828 seconds with Lightpanda, Chromium, and
+  native-login integration suites enabled. Both real browser engines uploaded a
+  combined context image and resolved fixture badge IDs to original VM pixels.
+  Gemini's subsequent live context check passed using the shared signed-in tab.
+
+## 2026-10-17 — Scroll context for Qwen questions
+
+- Added bounded native-panel scroll capture for the current Windows quiz layout.
+  Overlapping question sections and the final numbered answer view are uploaded
+  in one private PNG; local click coordinates stay tied to the live VM frame.
+- Check question/VM identity, scrollbar endpoints, and visible answer context.
+  Changed views, cancellation, ambiguous scrollbars, or excess views stop input.
+  All required answer controls must still fit in the final live view.
+- A live scroll pass collected the hidden diagram/instructions and returned to
+  the three-row table. Qwen read the combined image and returned all three
+  correct categories at 90% confidence in 39.851 seconds, without answer input.
+- Archived the first mock after its timer expired at ten recorded selections;
+  reset confidence monitoring for the user's new 25-question mock.
+- All 174 tests passed with Lightpanda, Chromium, and native-login integrations
+  enabled, including scroll cancellation, endpoint checks, context packing, and
+  rejection of changed answer views between selections.
+
+## 2026-10-17 — Qwen monitoring and abstention confidence
+
+- Preserve valid model-reported confidence for no-action results in cycle logs,
+  alongside the abstention explanation. Missing/invalid confidence remains
+  absent, and each parse clears previous abstention telemetry.
+- Started the requested Qwen-only 25-question observation run. The first ten
+  questions have recorded selections. Question 11 exposed an incomplete source
+  screenshot and a subsequent 150-second thinking timeout; the late response
+  reported 60% confidence and no input was sent. The run is still in progress.
+- Increased this run's attempt limit to its existing 240-second total budget;
+  kept the 85% minimum confidence and VM selection/freshness checks.
+- All 152 tests passed with Lightpanda, Chromium, and native-login integrations
+  enabled, including abstention telemetry validation and stale-value rejection.
+
 ## 2026-10-17 — Qwen control IDs and confirmed selection
 
 - Fixed missed VM answers caused by Qwen's inconsistent pixel estimates. Default

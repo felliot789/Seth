@@ -1,4 +1,4 @@
-"""Linux Ctrl+D+F trigger with chord suppression, including on Wayland."""
+"""Linux run, indicator, provider, and capture chords, including on Wayland."""
 
 import logging
 import select
@@ -10,7 +10,7 @@ LOG = logging.getLogger("seth")
 CTRL = {29, 97}
 SHIFT = {42, 54}
 LETTERS = {32, 33}  # D, F
-CHORD = CTRL | SHIFT | LETTERS
+SELECT_LETTERS = {18, 19}  # E, R
 
 
 class ChordFilter:
@@ -20,12 +20,20 @@ class ChordFilter:
     Holding keys, autorepeat, or an incomplete chord never queues extra cycles.
     """
 
-    def __init__(self, enable_toggle=False):
+    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False):
         self.down = set()
         self.pending = []
+        self.pending_group = None
         self.matched = False
+        self.matched_group = set()
+        self.cancelled = False
         self.blocked = False
-        self.enable_toggle = enable_toggle
+        self.bindings = {frozenset(LETTERS): ("cycle", "toggle" if enable_toggle else None)}
+        if enable_provider or enable_capture:
+            self.bindings[frozenset(SELECT_LETTERS)] = (
+                "provider" if enable_provider else None, "capture" if enable_capture else None)
+        self.letters = set().union(*self.bindings)
+        self.chord_keys = CTRL | SHIFT | self.letters
 
     def feed(self, code, value):
         if value == 1:
@@ -35,24 +43,38 @@ class ChordFilter:
         output = []
         fired = False
         if self.matched:
-            if self.enable_toggle and code in SHIFT and value == 1:
-                self.matched = "toggle"
-            if code not in LETTERS:
+            if code in SHIFT and value == 1:
+                shifted = self.bindings[frozenset(self.matched_group)][1]
+                if shifted:
+                    self.matched = shifted
+                else:
+                    self.cancelled = True
+            elif value == 1 and code not in CTRL | SHIFT | self.matched_group:
+                self.cancelled = True
+            if code not in self.matched_group:
                 output.append((code, value))
-            if not self.down & CHORD:
-                fired = self.matched
+            if not self.down & self.chord_keys:
+                fired = self.matched if not self.cancelled else False
                 self.matched = False
+                self.matched_group = set()
+                self.cancelled = self.blocked = False
             return output, fired
 
-        if (not self.blocked and code in LETTERS and self.down & CTRL
-                and self.down <= (CHORD if self.enable_toggle else CTRL | LETTERS)
-                and value in (1, 2)):
+        group = next((keys for keys in self.bindings if code in keys), None)
+        shifted = bool(self.down & SHIFT)
+        action = self.bindings[group][int(shifted)] if group else None
+        if (not self.blocked and group and action and self.down & CTRL
+                and self.down <= CTRL | SHIFT | group
+                and self.pending_group in (None, group) and value in (1, 2)):
             # Autorepeat isn't a second press; don't accumulate repeated events.
             if value == 1:
                 self.pending.append((code, value))
-            if LETTERS <= {key for key, _ in self.pending}:
+                self.pending_group = group
+            if group <= {key for key, _ in self.pending}:
                 self.pending.clear()
-                self.matched = "toggle" if self.down & SHIFT else "cycle"
+                self.pending_group = None
+                self.matched_group = set(group)
+                self.matched = action
             return output, False
 
         # An incomplete chord remains an ordinary Ctrl+D or Ctrl+F shortcut.
@@ -60,17 +82,20 @@ class ChordFilter:
         if self.pending:
             output.extend(self.pending)
             self.pending.clear()
+            self.pending_group = None
             self.blocked = True
         output.append((code, value))
-        if not self.down & CHORD:
+        if not self.down & self.chord_keys:
             self.blocked = False
         return output, False
 
 
 class SethHotkey:
-    def __init__(self, callback, devices=None, toggle_callback=None):
+    def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, capture_callback=None):
         self.callback = callback
         self.toggle_callback = toggle_callback
+        self.provider_callback = provider_callback
+        self.capture_callback = capture_callback
         self.paths = devices
         self.devices = []
 
@@ -91,14 +116,18 @@ class SethHotkey:
                     caps = device.capabilities()
                     keys = set(caps.get(evdev.ecodes.EV_KEY, []))
                     # Skip mice advertising keyboard keys and our own virtual devices.
-                    if (device.name.startswith("Seth shortcut") or not LETTERS <= keys
+                    required = LETTERS | (SELECT_LETTERS if self.provider_callback or self.capture_callback else set())
+                    if (device.name.startswith("Seth shortcut") or not required <= keys
                             or not keys & CTRL or (self.paths is None and evdev.ecodes.EV_REL in caps)):
                         continue
                     if device.active_keys():
                         raise TriggerError("Release all keyboard keys before starting the shortcut listener.")
                     virtual = evdev.UInput.from_device(device, name="Seth shortcut keyboard")
                     device.grab()
-                    self.devices.append((device, virtual, ChordFilter(enable_toggle=self.toggle_callback is not None)))
+                    self.devices.append((device, virtual, ChordFilter(
+                        enable_toggle=self.toggle_callback is not None,
+                        enable_provider=self.provider_callback is not None,
+                        enable_capture=self.capture_callback is not None)))
                     LOG.info("Shortcut keyboard: %s (%s)", device.name, path)
                     device = virtual = None
                 finally:
@@ -136,8 +165,14 @@ class SethHotkey:
                     virtual.syn()
                     if fired == "toggle":
                         self.toggle_callback()
-                        LOG.info("Ctrl+Shift+D+F: indicator visibility toggled")
-                    elif fired:
+                        LOG.info("Ctrl+Shift+D+F: indicator display cycled")
+                    elif fired == "provider":
+                        accepted = self.provider_callback()
+                        LOG.info("Ctrl+E+R: %s", "provider changed" if accepted else "busy; switch discarded")
+                    elif fired == "capture":
+                        accepted = self.capture_callback()
+                        LOG.info("Ctrl+Shift+E+R: %s", "capture mode changed" if accepted else "busy; switch discarded")
+                    elif fired == "cycle":
                         accepted = self.callback()
                         LOG.info("Ctrl+D+F: %s", "cycle requested" if accepted else "busy; request discarded")
                 else:

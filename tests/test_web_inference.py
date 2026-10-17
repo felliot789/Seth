@@ -57,6 +57,23 @@ class WebClientTests(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(AIError):
                 WebInferenceClient({"web": self.config["web"] | {field: value}}).validate_config()
 
+    def test_shared_native_profile_keeps_provider_tabs_and_cookie_files_separate(self):
+        client = WebInferenceClient({'web': self.config['web'] | {'providers':['gemini','qwen'],
+            'sites': {'gemini': {'engine':'chromium','browser_profile':'qwen','model_label':'Argon'},
+                      'qwen': {'engine':'chromium','model_label':'Qwen3.8-Omni-Flash'}}}})
+        with patch('web_inference.find_chromium', return_value=sys.executable):
+            client.validate_config()
+        self.assertEqual(client.login_profile('gemini'), client.login_profile('qwen'))
+        self.assertNotEqual(client.native_state_file('gemini'), client.native_state_file('qwen'))
+        self.assertNotEqual(client.cookie_file('gemini'), client.cookie_file('qwen'))
+        for value in ('../elsewhere', '', None, [], 1):
+            client.web['sites']['gemini']['browser_profile'] = value
+            with self.subTest(profile=value), self.assertRaises(AIError):
+                client.validate_config()
+        client.web['sites']['gemini'].update(browser_profile='qwen', engine='lightpanda')
+        with self.assertRaises(AIError):
+            client.validate_config()
+
     def test_only_configured_engines_need_installed_binaries(self):
         self.client.web["executable_path"] = "/nonexistent/lightpanda"
         self.client.web["sites"] = {"gemini": {"engine": "chromium", "model_label": "Argon"}}
@@ -121,6 +138,69 @@ class WebClientTests(unittest.TestCase):
             self.assertEqual(self.client.analyze_screenshot(self.image), '{"action":"none"}')
             self.assertEqual(run.call_count, 2)
         self.assertEqual(self.client.last_provider, "chatgpt")
+
+    def test_scroll_context_skips_unsupported_sites_and_keeps_original_live_coordinates(self):
+        self.client.web['providers'] = ['chatgpt', 'qwen']
+        with Image.open(self.image) as image:
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((169, 89, 190, 110), outline="#aaa", width=2)
+            draw.rectangle((20, 170, 33, 183), outline="#aaa", width=2)
+            image.save(self.image)
+        original = self.image.read_bytes()
+        contexts = [{"path": self.image, "box": (0, 0, 160, 80), "label": "Top of question"}]
+        uploads = []
+        def run(provider, deadline, operation):
+            self.assertEqual(provider, "qwen")
+            adapter = MagicMock()
+            def exchange(page, upload, prompt, report):
+                uploads.append(upload)
+                with Image.open(upload) as image:
+                    self.assertEqual(image.width, 320)
+                    self.assertGreater(image.height, 200)
+                self.assertIn("ONE question at different scroll positions", prompt)
+                self.assertIn("outside it, return action none", prompt)
+                self.assertIn('"01": "radio"', prompt)
+                self.assertNotIn('"02":', prompt)
+                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"B"}'
+            adapter.exchange.side_effect = exchange
+            return operation(adapter, None)
+        with patch.object(self.client, "_run", side_effect=run):
+            raw = self.client.analyze_screenshot(self.image, context_images=contexts,
+                                                 control_regions=[(160, 40, 240, 150)])
+        result = self.client.parse_coordinates(raw, 320, 200)
+        self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
+        self.assertEqual(self.client.last_provider, "qwen")
+        self.assertEqual(self.client.last_attempts, [{"provider": "chatgpt", "error_code": "browser_context"}])
+        self.assertEqual(self.image.read_bytes(), original)
+        self.assertFalse(uploads[0].exists())
+
+    def test_gemini_scroll_context_uses_the_same_numbered_controls_and_live_pixels(self):
+        self.client.web['providers'] = ['gemini']
+        with Image.open(self.image) as image:
+            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
+            image.save(self.image)
+        contexts = [{'path': self.image, 'box': (0, 0, 160, 80), 'label': 'Question top'}]
+        uploads = []
+        def run(provider, deadline, operation):
+            self.assertEqual(provider, 'gemini')
+            adapter = MagicMock()
+            def exchange(page, upload, prompt, report):
+                uploads.append(upload)
+                with Image.open(upload) as image:
+                    self.assertGreater(image.height, 200)
+                self.assertIn('LIVE ANSWER VIEW', prompt)
+                self.assertIn('"01": "radio"', prompt)
+                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"B"}'
+            adapter.exchange.side_effect = exchange
+            return operation(adapter, None)
+        with patch.object(self.client, '_run', side_effect=run):
+            raw = self.client.analyze_screenshot(self.image, context_images=contexts,
+                                                 control_regions=[(160, 40, 240, 150)])
+        result = self.client.parse_coordinates(raw, 320, 200)
+        self.assertEqual((result['click_x'], result['click_y']), (180, 100))
+        self.assertTrue(self.client.last_grounded)
+        self.assertEqual(self.client.last_provider, 'gemini')
+        self.assertFalse(uploads[0].exists())
 
     def test_explicit_qwen_coordinate_prompt_still_grounds_nearby_controls(self):
         self.client.web["providers"] = ["qwen"]
@@ -297,8 +377,9 @@ FIXTURE = r'''<!doctype html><html><body>
 <button id=send disabled>Send</button>
 <script>
 const scenario=SCENARIO;
-const answer=JSON.stringify({action:'click',coordinate_space:'normalized_1000',
- click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
+const answer=JSON.stringify(scenario==='control_ids'
+ ?{action:'click',target_id:'01',confidence:0.99,explanation:'Center'}
+ :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
 window.submissions=0;
 document.querySelector('#new-chat').onclick=()=>{
  document.querySelectorAll('.user,.response,.attachment,#stop').forEach(e=>e.remove());
@@ -390,6 +471,8 @@ TEST_SELECTORS = {
 
 @unittest.skipUnless(os.environ.get("SETH_LIGHTPANDA_TESTS") == "1", "Set SETH_LIGHTPANDA_TESTS=1 for offline Lightpanda integration")
 class LightpandaIntegrationTests(unittest.TestCase):
+    runtime_engine = 'lightpanda'
+
     @classmethod
     def setUpClass(cls):
         cls.uploads = []
@@ -450,6 +533,30 @@ class LightpandaIntegrationTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(self.uploads[-1]).digest(), hashlib.sha256(self.image.read_bytes()).digest())
                 decision = WebInferenceClient({}).parse_coordinates(raw, 320, 200)
                 self.assertEqual((decision["click_x"], decision["click_y"]), (160, 100))
+
+    def test_client_scroll_context_upload_uses_ids_and_retains_live_coordinates(self):
+        with Image.open(self.image) as image:
+            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
+            image.save(self.image)
+        config = {'web': {'providers': ['gemini'], 'state_dir': str(self.root / 'state'),
+                          'executable_path': os.environ.get('SETH_TEST_LIGHTPANDA', str(DEFAULT_BINARY)),
+                          'timeout_seconds': 12, 'attempt_timeout_seconds': 12,
+                          'sites': {'gemini': {'model_label': 'Pro', 'engine': self.runtime_engine}}}}
+        client = WebInferenceClient(config)
+        write_private_json(client.cookie_file('gemini'), [])
+        before = len(self.uploads)
+        with patch.object(client, 'adapter', return_value=self.adapter('control_ids')):
+            raw = client.analyze_screenshot(self.image, context_images=[{
+                'path': self.image, 'box': (0, 0, 160, 80), 'label': 'Question top'}],
+                control_regions=[(160, 40, 240, 150)])
+        decision = client.parse_coordinates(raw, 320, 200)
+        self.assertEqual((decision['click_x'], decision['click_y']), (180, 100))
+        self.assertTrue(client.last_grounded)
+        self.assertEqual(len(self.uploads), before + 1)
+        import io
+        with Image.open(io.BytesIO(self.uploads[-1])) as packed:
+            self.assertEqual(packed.width, 320)
+            self.assertGreater(packed.height, 200)
 
     def test_login_model_and_restored_conversation_fail_before_upload(self):
         for scenario, code in (("login", "browser_login"), ("wrong_model", "browser_model"), ("stale", "browser_layout")):
@@ -533,6 +640,7 @@ class LightpandaIntegrationTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1", "Set SETH_CHROMIUM_TESTS=1 for offline Chromium integration")
 class ChromiumIntegrationTests(LightpandaIntegrationTests):
     __unittest_skip__ = os.environ.get("SETH_CHROMIUM_TESTS") != "1"
+    runtime_engine = 'chromium'
 
     def browser(self, timeout=8, cookies=None):
         return Chromium(executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),

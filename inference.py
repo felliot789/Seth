@@ -82,10 +82,21 @@ def build_prompt(width, height, *, coordinate_space="normalized_1000"):
     )
 
 
-def build_control_prompt(width, height, controls):
+def build_control_prompt(width, height, controls, *, scroll_context=False):
     kinds = {identifier: control["kind"] for identifier, control in controls.items()}
+    context = (
+        "The uploaded image is a contact sheet of ONE question at different scroll positions. "
+        "Read all upper context sections, in panel/section order, to recover the complete question. "
+        "They may overlap or repeat content. Unbadged controls in those reference sections "
+        "are unannotated copies; their lack of badges does not imply they are selected. "
+        "The bottom LIVE ANSWER VIEW is the current screen. Only yellow badge IDs there "
+        "can be selected. Every required new selection must be available in that live view; "
+        "if a required control is outside it, return action none and explain that more answer rows "
+        "must be exposed. Judge existing selected answers only in the live view. "
+        if scroll_context else ""
+    )
     return (
-        f"Answer the currently visible question in this {width} by {height} screenshot. "
+        context + f"Answer the question in the {width} by {height} {'LIVE ANSWER VIEW' if scroll_context else 'screenshot'}. "
         "Yellow numbered badges are local annotations marking unchecked controls. "
         "Each badge replaces only that control's appearance; it is not question content. "
         f"Available badge IDs and original control types: {json.dumps(kinds)}. "
@@ -123,6 +134,7 @@ class DecisionClient:
         # Keep the no-action return contract while making an abstention
         # explainable to callers. A new parse must never reuse an old reason.
         self.last_no_action_explanation = None
+        self.last_no_action_confidence = None
         # Some compatible gateways treat JSON mode as a prompt and still fence
         # the result. Accept one complete outer fence, never extract fragments.
         if isinstance(response_text, str):
@@ -140,6 +152,10 @@ class DecisionClient:
             explanation = result.get("explanation")
             if isinstance(explanation, str):
                 self.last_no_action_explanation = explanation.strip() or None
+            confidence = result.get("confidence")
+            if (type(confidence) in (int, float) and math.isfinite(confidence)
+                    and 0 <= confidence <= 1):
+                self.last_no_action_confidence = confidence
             return None
         if type(width) is not int or type(height) is not int or min(width, height) <= 0:
             raise AIError("Screenshot dimensions must be positive integer pixels.")

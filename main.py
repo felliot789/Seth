@@ -23,7 +23,10 @@ LOG = logging.getLogger("seth")
 
 
 class SethEngine:
-    def __init__(self, config=None, execute=False):
+    PROVIDERS = ("api", "gemini", "qwen")
+    PROVIDER_LABELS = {"api": "API", "gemini": "Gemini", "qwen": "Qwen"}
+
+    def __init__(self, config=None, execute=False, *, manual_selection=False, initial_provider="api"):
         self.config = config if config is not None else load_config()
         threshold = self.config.get("min_confidence", 0.85)
         if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
@@ -32,13 +35,65 @@ class SethEngine:
         self.backend = VirtualBoxBackend(self.config)
         self.capture = SethCapture(self.config, self.backend)
         self.stop_event = threading.Event()
-        self.ai = create_client(self.config, stop_event=self.stop_event,
-                                progress=lambda label: setattr(self, "progress", ("thinking", label)))
+        self.manual_selection = manual_selection
+        if manual_selection and initial_provider not in self.PROVIDERS:
+            raise ValueError("Manual inference provider must be api, gemini, or qwen.")
+        self.selected_provider = initial_provider if manual_selection else None
+        self._scroll_enabled = False if manual_selection else None
+        self.ai = self._create_selected_client()
         self.clicker = SethClicker(self.config, self.backend)
         self._cycle_lock = threading.Lock()
         self._worker = None
         self.cycle_count = 0
         self.progress = ("idle", "Idle")
+
+    def _create_selected_client(self):
+        config = self.config
+        if self.manual_selection:
+            provider = self.selected_provider
+            config = config | {"inference": {"backend": "api" if provider == "api" else "web"}}
+            if provider != "api":
+                config = config | {"web": config.get("web", {}) | {"providers": [provider]}}
+        return create_client(config, stop_event=self.stop_event,
+                             progress=lambda label: setattr(self, "progress", ("thinking", label)))
+
+    @property
+    def scroll_enabled(self):
+        if self._scroll_enabled is not None:
+            return self._scroll_enabled
+        return self.config.get("capture", {}).get("scroll_context", {}).get("enabled", False)
+
+    @property
+    def indicator_selection(self):
+        if not self.manual_selection:
+            return None
+        return self.PROVIDER_LABELS[self.selected_provider] + " · " + ("Scroll" if self.scroll_enabled else "Single")
+
+    def cycle_provider(self):
+        if not self.manual_selection or self.stop_event.is_set() or not self._cycle_lock.acquire(blocking=False):
+            return False
+        try:
+            previous = self.selected_provider
+            self.selected_provider = self.PROVIDERS[(self.PROVIDERS.index(previous) + 1) % len(self.PROVIDERS)]
+            try:
+                self.ai = self._create_selected_client()
+            except Exception:
+                self.selected_provider = previous
+                raise
+            LOG.info("Selected inference: %s", self.indicator_selection)
+            return True
+        finally:
+            self._cycle_lock.release()
+
+    def toggle_capture(self):
+        if not self.manual_selection or self.stop_event.is_set() or not self._cycle_lock.acquire(blocking=False):
+            return False
+        try:
+            self._scroll_enabled = not self.scroll_enabled
+            LOG.info("Selected capture: %s", self.indicator_selection)
+            return True
+        finally:
+            self._cycle_lock.release()
 
     def run_cycle(self):
         if not self._cycle_lock.acquire(blocking=False):
@@ -57,8 +112,17 @@ class SethEngine:
         return True
 
     def _run_locked_cycle(self):
+        try:
+            return self._execute_cycle()
+        finally:
+            # Keep provider/mode stable through result metadata and logging too.
+            self._cycle_lock.release()
+
+    def _execute_cycle(self):
         result = {"status": "error"}
         completed_clicks = []
+        question = None
+        decision = None
         try:
             if self.stop_event.is_set():
                 result = {"status": "cancelled"}
@@ -68,9 +132,21 @@ class SethEngine:
             frame = self.capture.capture_frame()
             LOG.info("Captured %s (VM %s, screen %s, %sx%s)", frame.path,
                      frame.display.vm_uuid, frame.display.screen, frame.display.width, frame.display.height)
+            if (getattr(self.ai, "supports_scroll_context", False)
+                    and self.scroll_enabled):
+                from scroll_capture import ScrollCollector
+                capture_options = self.config.get("capture", {})
+                scroll_config = self.config | {"capture": capture_options | {
+                    "scroll_context": capture_options.get("scroll_context", {}) | {"enabled": True}}}
+                question = ScrollCollector(scroll_config, self.capture, self.stop_event,
+                                           report=lambda label: setattr(self, "progress", ("capturing", label))).collect(frame)
+                frame = question.frame
+                if question.contexts:
+                    LOG.info("Collected %s scroll context sections; live answer frame %s", len(question.contexts), frame.path)
             LOG.info("Waiting for Seth to identify the answer selections...")
             self.progress = ("thinking", "Waiting")
-            raw = self.ai.analyze_screenshot(frame.path)
+            raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
+                   if question is not None and question.contexts else self.ai.analyze_screenshot(frame.path))
             decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
             if self.stop_event.is_set():
                 result = {"status": "cancelled"}
@@ -79,26 +155,35 @@ class SethEngine:
                 explanation = getattr(self.ai, "last_no_action_explanation", None)
                 if explanation:
                     result["explanation"] = explanation
+                confidence = getattr(self.ai, "last_no_action_confidence", None)
+                if confidence is not None:
+                    result["confidence"] = confidence
             elif decision["confidence"] < self.config.get("min_confidence", 0.85):
                 result = {"status": "low_confidence", "decision": decision}
             elif not self.execute:
                 result = {"status": "dry_run", "decision": decision}
             else:
                 self.progress = ("selecting", "Selecting")
-                grounded = getattr(self.ai, "last_provider", None) == "qwen"
+                grounded = getattr(self.ai, "last_grounded", False) or getattr(self.ai, "last_provider", None) == "qwen"
                 if decision["action"] == "select":
                     for selection in decision["selections"]:
                         if self.stop_event.is_set():
                             raise VMError("Cycle cancelled; no further selections.")
+                        if question is not None and question.contexts:
+                            question.verify_identity(self.capture, self.stop_event)
                         self.capture.verify_target(frame, selection["click_x"], selection["click_y"])
                         click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.stop_event)
                         completed_clicks.append(click | {key: selection[key] for key in ("row", "choice", "option") if key in selection})
                         if grounded:
                             self.capture.verify_selection(frame, selection, self.stop_event)
                             completed_clicks[-1]["selection_verified"] = True
+                            if question is not None and question.contexts:
+                                question.selected_controls.append(selection)
                         self.progress = ("selecting", f"Selected {len(completed_clicks)}/{len(decision['selections'])}")
                     result = {"status": "clicked", "decision": decision, "click_count": len(completed_clicks), "clicks": completed_clicks}
                 else:
+                    if question is not None and question.contexts:
+                        question.verify_identity(self.capture, self.stop_event)
                     if grounded:
                         self.capture.verify_target(frame, decision["click_x"], decision["click_y"])
                     click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
@@ -133,14 +218,21 @@ class SethEngine:
             if completed_clicks and status != "clicked":
                 label = f"Stopped ({len(completed_clicks)})"
             self.progress = ("done" if status == "clicked" else status, label)
-            self._cycle_lock.release()
         if completed_clicks and result["status"] != "clicked":
             result["clicks_completed"] = len(completed_clicks)
             result["clicks"] = completed_clicks
+            if decision is not None:
+                result["decision"] = decision
         if getattr(self.ai, "last_provider", None):
             result["inference_provider"] = self.ai.last_provider
         if getattr(self.ai, "last_attempts", None):
             result["inference_attempts"] = self.ai.last_attempts
+        if self.manual_selection:
+            result["inference_provider"] = self.selected_provider
+            result["capture_mode"] = "scroll" if self.scroll_enabled else "single"
+        if question is not None and question.contexts:
+            result["context_sections"] = len(question.contexts)
+            result["capture_path"] = str(question.frame.path)
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
@@ -156,8 +248,8 @@ def main():
     parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
     parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
-    parser.add_argument("--hotkey", action="store_true", help="Enable host Ctrl+D+F in listen mode (Linux keyboard permissions required)")
-    parser.add_argument("--overlay", action="store_true", help="Show a host status indicator; Ctrl+Shift+D+F toggles visibility (requires --hotkey)")
+    parser.add_argument("--hotkey", action="store_true", help="Enable run, provider, and capture shortcuts in listen mode (starts API / Single)")
+    parser.add_argument("--overlay", action="store_true", help="Show a host indicator; Ctrl+Shift+D+F cycles Hidden / Dot / Full (requires --hotkey)")
     parser.add_argument("--delay", type=float, default=0,
                         help="Wait this many seconds before sending a host trigger")
     args = parser.parse_args()
@@ -189,7 +281,11 @@ def main():
             result = send_trigger(config["project_dir"])
             print(result)
             return 0 if result == "accepted" else 2
-        engine = SethEngine(config, execute=args.execute)
+        initial_provider = "api"
+        if args.hotkey and args.backend:
+            initial_provider = ("api" if args.backend == "api" else "gemini" if args.backend == "gemini_web"
+                                else config.get("web", {}).get("providers", ["gemini"])[0])
+        engine = SethEngine(config, execute=args.execute, manual_selection=args.hotkey, initial_provider=initial_provider)
 
         def stop(signum, frame):
             engine.stop_event.set()
@@ -200,7 +296,10 @@ def main():
             result = engine.run_cycle()
             print(json.dumps(result))
             return 1 if result["status"] == "error" else 0
-        engine.ai.validate_config()
+        # Missing credentials/session must not prevent switching to another
+        # provider. Interactive selection validates only when a cycle is run.
+        if not engine.manual_selection:
+            engine.ai.validate_config()
         trigger = SethTrigger(config["project_dir"], engine.request_cycle)
         overlay = None
         hotkey = None
@@ -211,20 +310,23 @@ def main():
                 overlay = SethOverlay()
             if args.hotkey:
                 hotkey = SethHotkey(engine.request_cycle, config.get("hotkey", {}).get("devices"),
-                                    toggle_callback=overlay.toggle if overlay is not None else None)
+                                    toggle_callback=overlay.toggle if overlay is not None else None,
+                                    provider_callback=engine.cycle_provider, capture_callback=engine.toggle_capture)
             if hotkey is not None:
                 hotkey.start()
             LOG.info("Host listener ready (%s). Run: python3 main.py --mode trigger", "clicks enabled" if args.execute else "dry run")
             if hotkey is not None:
                 LOG.info("Press Ctrl+D+F together, then release to capture and answer one question.")
+                LOG.info("Ctrl+E+R cycles API / Gemini / Qwen; Ctrl+Shift+E+R toggles Single / Scroll. Selected: %s", engine.indicator_selection)
             if overlay is not None:
-                LOG.info("Host indicator ready. Ctrl+Shift+D+F shows/hides it without starting a cycle.")
+                overlay.poll(engine.progress, engine.indicator_selection)
+                LOG.info("Host indicator ready (Full). Ctrl+Shift+D+F cycles Hidden / Dot / Full.")
 
             def poll():
                 if hotkey is not None:
                     hotkey.poll()
                 if overlay is not None:
-                    overlay.poll(engine.progress)
+                    overlay.poll(engine.progress, engine.indicator_selection)
 
             trigger.serve(engine.stop_event, poll=poll if hotkey is not None else None)
         finally:

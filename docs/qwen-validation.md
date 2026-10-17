@@ -1,7 +1,9 @@
 # Qwen web validation — updated 2026-10-17
 
-The configured fallback is Qwen3.8-Omni-Flash with Thinking, using the installed
-Chromium and a private native profile. Gemini remains first in the provider list.
+The configured Qwen model is Qwen3.8-Omni-Flash with Thinking, using the installed
+Chromium and a private native profile. The hotkey listener now starts with API
+and cycles API → Gemini → Qwen using Ctrl+E+R; it tries only the selected provider.
+The saved provider list for nonmanual runs is currently Qwen only.
 ChatGPT is excluded from the configured path. The user selected the Qwen model
 and thinking mode and authorized continued development after reviewing Qwen's
 web-automation restriction. This validation documents technical behavior, not
@@ -131,6 +133,141 @@ and the final numbered-control prompt:
 These checks sent no VM input. A prior live MCMA response rendered in the code
 editor was also retrieved intact through its Download button and parsed as the
 correct A/C plan; DOM-only extraction had rejected that same response.
+
+## First monitored 25-question run
+
+The user requested a Qwen-only run and a confidence record for every question.
+The first ten questions have a recorded selection; questions 2–10 have fresh-frame
+selection confirmation. Question 1 predates that confirmation telemetry.
+
+Question 11 first returned no action because relevant question text was below
+the visible area. Its reported confidence was zero. After the user scrolled and
+retried, Qwen was still generating when the 150-second attempt limit expired.
+That attempt sent no VM input. Qwen subsequently finished with confidence 0.6,
+below the configured 0.85 threshold. This late response is recorded separately
+and does not turn the timed-out cycle into a successful selection.
+
+For this run, the provider list is temporarily Qwen only and its attempt limit
+uses the existing 240-second total budget. This allows more thinking time; it
+does not guarantee completion or a sufficiently confident answer. The threshold
+and screenshot freshness checks remain in place. The mock's timer expired
+before the run resumed. It ended with ten recorded selections and question 11
+unresolved; questions 12–25 were not observed. Its files are archived under
+the ignored `captures/qwen-history/mock-1-20261017/` directory.
+
+Abstention results now preserve a reported confidence in the cycle log when it
+is a finite number from zero to one. Missing or invalid values remain absent;
+they are not replaced with zero, and later cycles cannot reuse an earlier value.
+The ignored `captures/qwen-confidence-25.csv` and
+`captures/qwen-confidence-attempts.jsonl` retain per-question and per-attempt
+records, including the late response and timeout as separate facts.
+All 152 local tests passed with Lightpanda, Chromium, and native-login
+integrations enabled in 130.368 seconds after the confidence logging change.
+
+## Scrolling question context — second mock
+
+The new mock's first question contains a diagram and instructions above a
+three-row classification table inside the right column's independent scrollbar.
+The diagram and table cannot fit in one visible viewport at the current zoom.
+
+The Qwen path now captures overlapping top/middle sections of configured native
+scroll panels, leaves each panel at its bottom, and uploads their reference crops
+above a numbered copy of the final live answer frame in one PNG. Only controls
+within the question columns are labeled; context copies never supply click
+coordinates. Source VM coordinates remain unchanged despite the larger upload.
+The native SDK uses one bounded scrollbar drag per position and always attempts
+button release, including on cancellation or ambiguous input failure.
+
+The live capture pass found the right column, reached both endpoints, collected
+two reference sections, and returned to all six radios in the final table.
+A genuine Qwen inference-only test read the combined image and returned the
+correct false/true/false plan, IDs `02`/`03`/`06`, at confidence 0.9 in 39.851
+seconds. It sent no answer input. A subsequent user-triggered cycle collected
+two context sections and returned the same plan at confidence 0.8. That fell
+below the unchanged 0.85 threshold, so Seth selected nothing. A sufficiently
+confident triggered selection remains unverified on this live table.
+
+Capture is bounded by configured columns and a maximum of eight views. Native
+gray thumbs with up/down arrows are required; unsupported/custom scrollbar
+themes may not be recognized. The question header and VM identity are checked
+throughout collection. Before each answer click, the visible question columns
+must still match, except around earlier verified selections. Question changes,
+scroll changes, endpoint failures, and cancellation stop the plan. Every required
+new control must be visible in the final answer view; cross-viewport answer
+selection is not implemented, and the prompt requires abstention in that case.
+
+The second mock has a fresh 25-question confidence ledger. The first mock's
+results are retained separately. The standalone context probe is saved in the
+ignored `captures/scroll-qwen-probe-result.json` file.
+All 174 local tests passed with Lightpanda, Chromium, and native-login
+integrations enabled in 138.134 seconds for the initial scroll implementation.
+
+## Manual controls and shared scroll context
+
+The hotkey listener starts at API / Single / Full. Ctrl+E+R selects API, Gemini,
+or Qwen; Ctrl+Shift+E+R independently toggles Single/Scroll capture. Both changes
+are idle-only, persist between questions, and reset on restart. Switching sends
+no request and preserves the last result color. An uncertain answer never
+automatically requests a different provider in this mode.
+
+Ctrl+Shift+D+F cycles Hidden → Dot-only → Full → Hidden. Full includes the
+selected provider and capture mode; Dot-only renders a small colored circle
+without text or panel and never expands on a status change. Both modes place
+the dot at the same screen position. Gray is idle, blue capturing, yellow waiting,
+purple selecting, green done, orange uncertain/no-selection, and red error.
+
+API and Gemini now support the same combined scroll-context image and strict
+control-ID resolution as Qwen. The live-frame coordinates remain authoritative,
+and every grounded click requires fresh-frame confirmation. Single capture
+retains the existing API/Gemini coordinate behavior. Native scrollbar and final
+answer-viewport limitations still apply to all providers.
+
+The confidence ledger now records the actual provider and capture mode for each
+attempt. Separate Qwen/Gemini/API confidence columns prevent another provider's
+answer from being reported as Qwen confidence. Completed selections advance the
+estimated question number; visual confirmation is recorded separately. Explicit
+frame-to-question mappings can correct the estimates. Pending questions remain
+blank, and the first mock's records remain in their archive.
+
+All 199 local tests passed in 140.828 seconds with Lightpanda, Chromium, and
+native-login integration suites enabled. Real Lightpanda and Chromium tests
+verified one combined PNG upload, ID extraction, and original-frame coordinates;
+API context uploads passed through both local streamed and nonstreamed HTTP
+fixtures. Manual-switch tests cover no external requests, busy rejection, mode
+persistence, no uncertainty fallback, and lock coverage through result logging.
+The actual Qwen context probe above remains valid. Gemini's initial session
+mismatch and subsequent successful context probe are recorded below.
+
+## Table hover correction and current browser sessions
+
+A user-triggered API/Scroll cycle submitted a valid classification plan, but
+stopped after its first click because the gray hover background filled the
+post-click comparison area. The original and post-click captures show that the
+first control was selected successfully. Moving the guest pointer away clears
+the hover state; strict confirmation then recognizes the selected glyph.
+
+Seth now parks the guest pointer with no pressed buttons before the final scroll
+baseline and after each grounded click. This preserves the existing strict
+question and control checks, without retrying an answer click. Anonymous 40 × 40
+control fixtures cover the hovered and cleared states, and SDK tests require
+exactly one button-free move with the usual age/VM checks. Partial-plan errors
+also retain the model decision and confidence.
+
+The signed-in Gemini session was in tab 2 of the Qwen Chromium window; Seth's
+previous Gemini endpoint selected a separate signed-out window. Gemini now uses
+`browser_profile: "qwen"` and a private endpoint record for its actual Argon/Medium
+tab. Qwen remains attached to its own tab. Both sessions passed login/model
+checks without restarting the signed-in browser. Keep the shared window open or
+minimized. Closing it affects both providers.
+
+All 202 local tests passed in 143.684 seconds with the three integration flags.
+A fresh API/Scroll answer cycle remains pending after the hover correction.
+
+The live Gemini inference-only probe uploaded one combined PNG whose reference
+section contained a code absent from the answer view. Argon/Medium selected the
+correct badge `02` at confidence 1.0 in 14.709 seconds; local ID resolution
+returned `(100, 380)` in the original answer frame. No VM answer input was sent.
+The private result is saved in `captures/gemini-scroll-probe-result.json`.
 
 ## Local regression coverage
 

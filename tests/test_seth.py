@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import requests
 from ai_client import AIError, SethAIClient
 from capture import Frame, SethCapture
@@ -70,6 +70,29 @@ class DecisionTests(unittest.TestCase):
 
     def test_no_action(self):
         self.assertIsNone(self.client.parse_coordinates('{"action":"none"}', 320, 200))
+
+    def test_abstention_confidence_is_optional_validated_and_never_reused(self):
+        invalid = (None, True, "0", -0.1, 1.1, math.nan, math.inf, [], {})
+        for value in (0, .6, 1):
+            with self.subTest(confidence=value):
+                self.assertIsNone(self.client.parse_coordinates(json.dumps(
+                    {"action": "none", "confidence": value}), 320, 200))
+                self.assertEqual(self.client.last_no_action_confidence, value)
+        for value in invalid:
+            with self.subTest(invalid=value):
+                self.client.parse_coordinates('{"action":"none","confidence":0.6}', 320, 200)
+                self.assertIsNone(self.client.parse_coordinates(json.dumps(
+                    {"action": "none", "confidence": value}), 320, 200))
+                self.assertIsNone(self.client.last_no_action_confidence)
+        for raw in ('{"action":"none"}', json.dumps(DECISION), "not JSON"):
+            with self.subTest(next_response=raw):
+                self.client.parse_coordinates('{"action":"none","confidence":0.6}', 320, 200)
+                if raw == "not JSON":
+                    with self.assertRaises(AIError):
+                        self.client.parse_coordinates(raw, 320, 200)
+                else:
+                    self.client.parse_coordinates(raw, 320, 200)
+                self.assertIsNone(self.client.last_no_action_confidence)
 
     def test_no_action_explanation_is_optional_and_never_reused(self):
         reason = "The computed answer does not match any listed option."
@@ -224,6 +247,31 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.engine.cycle_count, 0)
         self.click.assert_called_once()
 
+    def test_scrolled_question_uses_context_and_rechecks_identity_before_input(self):
+        self.engine.ai.supports_scroll_context = True
+        self.engine.config["capture"]["scroll_context"] = {"enabled": True}
+        bundle = Mock(frame=self.frame, contexts=[{"path": "context.png"}], regions=[(1, 1, 100, 100)])
+        with patch("scroll_capture.ScrollCollector") as collector:
+            collector.return_value.collect.return_value = bundle
+            result = self.engine.run_cycle()
+        self.assertEqual(result["status"], "clicked")
+        self.analyze.assert_called_once_with(self.frame.path, context_images=bundle.contexts, control_regions=bundle.regions)
+        bundle.verify_identity.assert_called_once_with(self.engine.capture, self.engine.stop_event)
+        self.assertEqual(result["context_sections"], 1)
+        self.assertEqual(result["capture_path"], str(self.frame.path))
+
+    def test_scrolled_question_header_change_prevents_every_answer_click(self):
+        self.engine.ai.supports_scroll_context = True
+        self.engine.config["capture"]["scroll_context"] = {"enabled": True}
+        bundle = Mock(frame=self.frame, contexts=[{"path": "context.png"}], regions=[])
+        bundle.verify_identity.side_effect = VMError("Question header changed")
+        with patch("scroll_capture.ScrollCollector") as collector:
+            collector.return_value.collect.return_value = bundle
+            result = self.engine.run_cycle()
+        self.assertEqual(result["status"], "error")
+        self.assertIn("header changed", result["error"])
+        self.click.assert_not_called()
+
     def test_qwen_plan_stops_before_next_target_when_confirmation_fails(self):
         self.engine.ai.last_provider = "qwen"
         self.analyze.return_value = json.dumps(CLASSIFICATION)
@@ -277,6 +325,22 @@ class CycleTests(unittest.TestCase):
                     result = self.engine.run_cycle()
                 self.assertEqual(result, {"status": "no_action"})
                 self.assertNotIn(reason, messages.output[-1])
+                self.click.assert_not_called()
+                self.verify.assert_not_called()
+
+    def test_no_action_confidence_is_logged_without_clicking_or_guessing_missing_values(self):
+        for value in (0, .6, 1, None, True, "0.6", math.nan):
+            with self.subTest(confidence=value):
+                self.analyze.return_value = '{"action":"none","confidence":0.99}'
+                self.engine.run_cycle()
+                self.analyze.return_value = json.dumps({"action": "none", "confidence": value})
+                with self.assertLogs("seth", level="INFO") as messages:
+                    result = self.engine.run_cycle()
+                expected = {"status": "no_action"}
+                if type(value) in (int, float) and math.isfinite(value):
+                    expected["confidence"] = value
+                self.assertEqual(result, expected)
+                self.assertIn(json.dumps(expected), messages.output[-1])
                 self.click.assert_not_called()
                 self.verify.assert_not_called()
 
@@ -522,6 +586,50 @@ class LocalAPI:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_scroll_context_uploads_one_combined_png_and_maps_ids_to_the_live_frame(self):
+        answer = {'action': 'click', 'target_id': '01', 'confidence': .95, 'explanation': 'B'}
+        event = lambda obj: 'data: ' + json.dumps(obj) + '\n\n'
+        stream = (event({'choices': [{'delta': {'content': json.dumps(answer)}}]})
+                  + event({'choices': [{'delta': {}, 'finish_reason': 'stop'}]}) + 'data: [DONE]\n\n')
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming), tempfile.TemporaryDirectory() as root, \
+                    LocalAPI(decision=answer, stream_events=stream if streaming else None) as api:
+                path = Path(root) / 'question.png'
+                image = Image.new('RGB', (320, 200), 'white')
+                ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
+                image.save(path)
+                original = path.read_bytes()
+                config = configuration(root)
+                config['api'].update(base_url=api.url, stream=streaming)
+                client = SethAIClient(config)
+                raw = client.analyze_screenshot(path, context_images=[{'path': path, 'box': (0, 0, 160, 80)}],
+                                               control_regions=[(160, 40, 240, 150)])
+                result = client.parse_coordinates(raw, 320, 200)
+                self.assertEqual((result['click_x'], result['click_y']), (180, 100))
+                self.assertEqual(result['target_control']['box'], [169, 89, 191, 111])
+                self.assertTrue(client.last_grounded)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(len(api.requests), 1)
+                content = api.requests[0][2]['messages'][0]['content']
+                self.assertIn('LIVE ANSWER VIEW', content[0]['text'])
+                png = base64.b64decode(content[1]['image_url']['url'].split(',', 1)[1])
+                with Image.open(io.BytesIO(png)) as sent:
+                    self.assertEqual(sent.width, 320)
+                    self.assertGreater(sent.height, 200)
+
+    def test_scroll_context_invalid_control_is_rejected_after_one_request(self):
+        with tempfile.TemporaryDirectory() as root, LocalAPI(decision={
+                'action': 'click', 'target_id': '99', 'confidence': .99, 'explanation': 'Bad ID'}) as api:
+            path = Path(root) / 'question.png'
+            Image.new('RGB', (320, 200), 'white').save(path)
+            config = configuration(root)
+            config['api'].update(base_url=api.url)
+            client = SethAIClient(config)
+            with self.assertRaises(AIError):
+                client.analyze_screenshot(path, context_images=[{'path': path, 'box': (0, 0, 160, 80)}])
+            self.assertFalse(client.last_grounded)
+            self.assertEqual(len(api.requests), 1)
+
     def test_unresolvable_gateway_is_reported_without_retry_or_click(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "test.png"

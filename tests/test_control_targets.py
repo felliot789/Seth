@@ -166,6 +166,35 @@ class ControlTargetTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), original)
             self.assertFalse(upload.exists())
 
+    def test_scroll_reference_controls_are_unbadged_and_never_become_live_targets(self):
+        image = Image.new("RGB", (360, 240), "white")
+        draw_control(image, "radio", (60, 80))
+        draw_control(image, "radio", (200, 160))
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source.png"
+            image.save(source)
+            context = [{"path": source, "box": (0, 40, 120, 120), "label": "Earlier context"}]
+            with annotated_controls(source, context_images=context, regions=[(150, 120, 300, 200)]) as (upload, controls):
+                self.assertEqual(controls, {"01": {"kind": "radio", "box": [189, 149, 211, 171]}})
+                with Image.open(upload) as packed:
+                    self.assertGreater(packed.height, 240)
+                    self.assertEqual(packed.crop((0, 32, 120, 112)).tobytes(), image.crop((0, 40, 120, 120)).tobytes())
+                    self.assertEqual(packed.getpixel((60, packed.height - 240 + 80)), image.getpixel((60, 80)))
+                self.assertEqual(upload.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(upload.exists())
+
+    def test_invalid_scroll_crop_or_frame_dimensions_reject_the_whole_pack(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source.png"
+            other = Path(root) / "other.png"
+            self.image.save(source)
+            Image.new("RGB", (5, 5), "white").save(other)
+            for path, box in ((source, (-1, 0, 40, 40)), (source, (0, 0, True, 40)),
+                              (other, (0, 0, 40, 40))):
+                with self.subTest(path=path, box=box), self.assertRaises(AIError):
+                    with annotated_controls(source, context_images=[{"path": path, "box": box}]):
+                        self.fail("Invalid context should never be uploaded")
+
     def test_ids_resolve_single_classification_and_multiple_answer_plans(self):
         controls = {"01": {"kind": "radio", "box": [49, 29, 71, 51]},
                     "02": {"kind": "checkbox", "box": [49, 89, 71, 111]},
@@ -226,10 +255,12 @@ class SelectionCaptureTests(unittest.TestCase):
         self.after = Frame(root / "after.png", display, time.monotonic())
         self.capture = SethCapture({"project_dir": str(root)}, backend=Mock())
 
-    def test_waits_for_rendered_selection_without_any_additional_input(self):
+    def test_clears_hover_once_and_waits_for_selection_without_another_click(self):
         with patch.object(self.capture, "capture_frame", side_effect=[self.before, self.after]) as capture:
             self.capture.verify_selection(self.before, self.target)
         self.assertEqual(capture.call_count, 2)
+        self.capture.backend.park_pointer.assert_called_once_with(self.before, 150, None)
+        self.capture.backend.click.assert_not_called()
 
     def test_unchanged_control_times_out_and_cancellation_prevents_capture(self):
         with patch.object(self.capture, "capture_frame", return_value=self.before), \
@@ -237,9 +268,32 @@ class SelectionCaptureTests(unittest.TestCase):
             self.capture.verify_selection(self.before, self.target)
         event = threading.Event()
         event.set()
+        self.capture.backend.reset_mock()
         with patch.object(self.capture, "capture_frame") as capture, self.assertRaises(VMError):
             self.capture.verify_selection(self.before, self.target, event)
         capture.assert_not_called()
+        self.capture.backend.park_pointer.assert_not_called()
+
+    def test_real_table_selection_is_confirmed_after_parking_clears_row_hover(self):
+        fixtures = Path(__file__).parent / 'fixtures/controls'
+        paths = [fixtures / name for name in ('unchecked-radio-row.png', 'selected-radio-row-hover.png',
+                                               'selected-radio-row.png')]
+        with Image.open(paths[0]) as before, Image.open(paths[1]) as hovered, Image.open(paths[2]) as cleared:
+            control, x, y = locate_control(before, 20, 20, 'radio')
+            self.assertFalse(selection_visible(before, hovered, control))
+            self.assertTrue(selection_visible(before, cleared, control))
+        display = GuestDisplay(**(TEST_DISPLAY | {'width': 40, 'height': 40}))
+        frames = [Frame(path, display, time.monotonic()) for path in paths]
+        hover_active = True
+        def park(*args):
+            nonlocal hover_active
+            hover_active = False
+        self.capture.backend.park_pointer.side_effect = park
+        with patch.object(self.capture, 'capture_frame', side_effect=lambda: frames[1 if hover_active else 2]) as capture:
+            self.capture.verify_selection(frames[0], {'click_x': x, 'click_y': y, 'target_control': control})
+        self.capture.backend.park_pointer.assert_called_once()
+        self.capture.backend.click.assert_not_called()
+        self.assertEqual(capture.call_count, 1)
 
 
 if __name__ == "__main__":

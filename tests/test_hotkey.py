@@ -182,6 +182,79 @@ class HotkeyTests(unittest.TestCase):
         finally:
             hotkey.stop()
 
+    def test_all_four_actions_dispatch_only_to_their_own_callback(self):
+        self.device.capabilities.return_value = {1: [18, 19, 32, 33, 29, 42]}
+        run, indicator, provider, capture = (Mock(return_value=True) for _ in range(4))
+        hotkey = SethHotkey(run, toggle_callback=indicator, provider_callback=provider, capture_callback=capture)
+        hotkey.start()
+        events = []
+        for letters, shifted in (((32, 33), False), ((32, 33), True), ((18, 19), False), ((18, 19), True)):
+            modifiers = [29] + ([42] if shifted else [])
+            events += [(key, 1) for key in modifiers + list(letters)]
+            events += [(key, 0) for key in reversed(modifiers + list(letters))]
+        self.device.read.return_value = [SimpleNamespace(type=1, code=c, value=v) for c, v in events]
+        try:
+            with patch('hotkey.select.select', return_value=([self.device], [], [])):
+                hotkey.poll()
+            for callback in (run, indicator, provider, capture):
+                callback.assert_called_once_with()
+            self.assertTrue(all(call.args[1] in (29, 42) for call in self.virtual.write.call_args_list))
+        finally:
+            hotkey.stop()
+
+
+class SelectionChordTests(unittest.TestCase):
+    def replay(self, events, **options):
+        chord = ChordFilter(enable_toggle=True, enable_provider=True, enable_capture=True, **options)
+        output, actions = [], []
+        for index, event in enumerate(events):
+            forwarded, action = chord.feed(*event)
+            output.extend(forwarded)
+            if action:
+                actions.append((index, action))
+        return output, actions
+
+    def test_both_letter_orders_modifiers_and_autorepeat_fire_once_after_release(self):
+        for ctrl in (29, 97):
+            for shift in (None, 42, 54):
+                for letters in ((18, 19), (19, 18)):
+                    with self.subTest(ctrl=ctrl, shift=shift, letters=letters):
+                        modifiers = [ctrl] + ([shift] if shift else [])
+                        events = ([(key, 1) for key in modifiers] + [(letters[0], 1), (letters[0], 2),
+                                  (letters[1], 1), (letters[1], 2), (ctrl, 0), (letters[0], 0), (letters[1], 0)]
+                                  + ([(shift, 0)] if shift else []))
+                        output, actions = self.replay(events)
+                        self.assertEqual(output, [(key, value) for key, value in events if key in modifiers])
+                        self.assertEqual(actions, [(len(events) - 1, 'capture' if shift else 'provider')])
+
+    def test_shift_added_late_selects_capture_instead_of_provider(self):
+        events = [(29, 1), (18, 1), (19, 1), (54, 1), (54, 0), (18, 0), (19, 0), (29, 0)]
+        self.assertEqual(self.replay(events)[1], [(7, 'capture')])
+
+    def test_partial_mixed_or_unsupported_chords_pass_through_without_an_action(self):
+        for events in (
+            [(29, 1), (18, 1), (18, 0), (29, 0)],
+            [(29, 1), (19, 1), (29, 0), (19, 0)],
+            [(29, 1), (18, 1), (33, 1), (33, 0), (18, 0), (29, 0)],
+            [(56, 1), (29, 1), (18, 1), (19, 1), (19, 0), (18, 0), (29, 0), (56, 0)],
+            [(18, 1), (29, 1), (19, 1), (19, 0), (29, 0), (18, 0)],
+        ):
+            with self.subTest(events=events):
+                self.assertEqual(self.replay(events), (events, []))
+
+    def test_unrelated_key_after_a_completed_chord_cancels_the_action(self):
+        for extra in (32, 56, 30):
+            events = [(29, 1), (18, 1), (19, 1), (extra, 1), (extra, 0), (18, 0), (19, 0), (29, 0)]
+            self.assertEqual(self.replay(events)[1], [])
+
+    def test_disabled_selection_shortcuts_pass_through_and_full_release_rearms(self):
+        events = [(29, 1), (18, 1), (19, 1), (19, 0), (18, 0), (29, 0)]
+        chord = ChordFilter(enable_toggle=True)
+        for event in events:
+            self.assertEqual(chord.feed(*event), ([event], False))
+        output, actions = self.replay(events * 2)
+        self.assertEqual(actions, [(5, 'provider'), (11, 'provider')])
+
 
 if __name__ == "__main__":
     unittest.main()

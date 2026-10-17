@@ -22,6 +22,7 @@ class Frame:
 class SethCapture:
     def __init__(self, config, backend=None):
         self.backend = backend if backend is not None else VirtualBoxBackend(config)
+        self.max_age = config.get("capture", {}).get("max_age_seconds", 150)
         root = Path(config.get("project_dir", Path(__file__).resolve().parent))
         self.output_dir = root / config.get("capture", {}).get("output_dir", "captures")
 
@@ -59,6 +60,11 @@ class SethCapture:
 
     def verify_selection(self, frame, target, stop_event=None):
         """Confirm a grounded control became selected; never retry the click."""
+        if stop_event is not None and stop_event.is_set():
+            raise VMError("Cycle cancelled while confirming selection; no further input.")
+        # The table highlights the entire hovered row. Clear hover before the
+        # strict control/background check and the next question-identity check.
+        self.backend.park_pointer(frame, self.max_age, stop_event)
         deadline = time.monotonic() + 1.5
         while True:
             if stop_event is not None and stop_event.is_set():

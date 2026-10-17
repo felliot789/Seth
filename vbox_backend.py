@@ -68,7 +68,7 @@ class VirtualBoxBackend:
                 input=json.dumps(request), capture_output=True, text=True, timeout=30, env=helper_env,
             )
         except subprocess.TimeoutExpired:
-            message = "VirtualBox input timed out; completion is unknown." if operation == "click" else "VirtualBox SDK request timed out."
+            message = "VirtualBox input timed out; completion is unknown." if operation in ("click", "drag", "move") else "VirtualBox SDK request timed out."
             raise VMError(message) from None
         except OSError:
             raise VMError("Cannot start the VirtualBox SDK helper; check vm.sdk_python.") from None
@@ -90,9 +90,22 @@ class VirtualBoxBackend:
         return GuestDisplay(**result["display"]), result["captured_at"]
 
     def click(self, frame, x, y, max_age, stop_event=None):
+        return self._input("click", frame, max_age, stop_event, x=x, y=y)
+
+    def drag(self, frame, x, y, end_x, end_y, max_age, stop_event=None):
+        return self._input("drag", frame, max_age, stop_event,
+                           x=x, y=y, end_x=end_x, end_y=end_y)
+
+    def park_pointer(self, frame, max_age, stop_event=None):
+        # Avoid desktop corners and answer rows. This is a button-free move in
+        # guest pixels, never a host cursor operation or an extra answer click.
+        return self._input("move", frame, max_age, stop_event,
+                           x=min(8, frame.display.width - 1), y=frame.display.height // 2)
+
+    def _input(self, operation, frame, max_age, stop_event, **coordinates):
         def send(**extra):
-            return self._request("click", expected=asdict(frame.display), captured_at=frame.captured_at,
-                                 max_age=max_age, x=x, y=y, **extra)
+            return self._request(operation, expected=asdict(frame.display), captured_at=frame.captured_at,
+                                 max_age=max_age, **coordinates, **extra)
 
         if stop_event is None:
             return send()
@@ -143,7 +156,7 @@ def sdk_operation(request, manager_factory=None):
     locked = False
     try:
         operation = request["operation"]
-        if operation not in ("status", "capture", "click"):
+        if operation not in ("status", "capture", "click", "drag", "move"):
             raise VMError("Unsupported VirtualBox operation.")
         manager = manager_factory(None, None)
         try:
@@ -191,12 +204,32 @@ def sdk_operation(request, manager_factory=None):
         x, y = request["x"], request["y"]
         if type(x) is not int or type(y) is not int or not (0 <= x < display.width and 0 <= y < display.height):
             raise VMError("Click lies outside the captured guest display.")
+        if operation == "drag":
+            end_x, end_y = request["end_x"], request["end_y"]
+            if (type(end_x) is not int or type(end_y) is not int
+                    or not (0 <= end_x < display.width and 0 <= end_y < display.height)):
+                raise VMError("Drag endpoint lies outside the captured guest display.")
         check_target()
         # The SDK takes guest desktop pixels starting at (1, 1), not host pixels.
         guest_x, guest_y = display.x_origin + x + 1, display.y_origin + y + 1
         mouse = console.mouse
         mouse.putMouseEventAbsolute(guest_x, guest_y, 0, 0, 0)
         check_target()
+        if operation == "move":
+            return {"pointer_x": x, "pointer_y": y, "vm_uuid": display.vm_uuid, "screen": screen}
+        if operation == "drag":
+            last_x, last_y = guest_x, guest_y
+            try:
+                mouse.putMouseEventAbsolute(guest_x, guest_y, 0, 0, 1)
+                for step in range(1, 11):
+                    check_target()
+                    last_x = display.x_origin + round(x + (end_x - x) * step / 10) + 1
+                    last_y = display.y_origin + round(y + (end_y - y) * step / 10) + 1
+                    mouse.putMouseEventAbsolute(last_x, last_y, 0, 0, 1)
+                    time.sleep(0.025)
+            finally:
+                mouse.putMouseEventAbsolute(last_x, last_y, 0, 0, 0)
+            return {"start": [x, y], "end": [end_x, end_y], "vm_uuid": display.vm_uuid, "screen": screen}
         try:
             mouse.putMouseEventAbsolute(guest_x, guest_y, 0, 0, 1)
             # Let the guest's virtual input device poll the pressed state before
@@ -210,7 +243,7 @@ def sdk_operation(request, manager_factory=None):
     except VMError:
         raise
     except Exception:
-        if request.get("operation") == "click":
+        if request.get("operation") in ("click", "drag", "move"):
             raise VMError("VirtualBox SDK input failed; completion may be unknown. Check the VM and host SDK.") from None
         raise VMError("VirtualBox SDK capture/status failed; check the VM display and host SDK.") from None
     finally:

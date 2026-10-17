@@ -195,12 +195,56 @@ def catalog_controls(image):
     return {f"{index:02d}": control for index, control in enumerate(controls, 1)}
 
 
+def _context_sheet(answer, contexts):
+    if not isinstance(contexts, list) or not 1 <= len(contexts) <= 12:
+        raise AIError("Scroll context must contain one to twelve reference sections.", "browser_grounding")
+    tiles = []
+    for context in contexts:
+        box = context.get("box")
+        if (not isinstance(box, (list, tuple)) or len(box) != 4 or any(type(v) is not int for v in box)
+                or not 0 <= box[0] < box[2] <= answer.width or not 0 <= box[1] < box[3] <= answer.height):
+            raise AIError("Scroll context has an invalid crop rectangle.", "browser_grounding")
+        with Image.open(context["path"]) as source:
+            if source.format != "PNG" or source.size != answer.size:
+                raise AIError("Scroll context must match the live answer frame dimensions.", "browser_grounding")
+            tiles.append((source.crop(box).convert("RGB"), str(context.get("label", "Question context"))[:100]))
+    positions, x, y, row_height = [], 0, 0, 0
+    for tile, label in tiles:
+        if x and x + tile.width > answer.width:
+            x, y, row_height = 0, y + row_height + 12, 0
+        positions.append((x, y, tile, label))
+        x += tile.width + 12
+        row_height = max(row_height, tile.height + 36)
+    answer_y = y + row_height + 48
+    height = answer_y + answer.height
+    if height > 8192 or height * answer.width > 16_000_000:
+        raise AIError("Scroll context image exceeds its bounded size; no inference sent.", "browser_grounding")
+    result = Image.new("RGB", (answer.width, height), "#e2e8f0")
+    draw = ImageDraw.Draw(result)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 18)
+    except OSError:
+        font = ImageFont.load_default()
+    for x, y, tile, label in positions:
+        draw.text((x + 6, y + 5), label + " (reference only)", font=font, fill="#0f172a")
+        result.paste(tile, (x, y + 32))
+    draw.text((8, answer_y - 32), "LIVE ANSWER VIEW - choose only yellow badge IDs here", font=font, fill="#0f172a")
+    result.paste(answer, (0, answer_y))
+    return result
+
+
 @contextmanager
-def annotated_controls(image_path):
+def annotated_controls(image_path, *, context_images=None, regions=None):
     """Upload-only annotated copy; the original VM frame stays unchanged."""
     with Image.open(image_path) as original:
         controls = catalog_controls(original)
         image = original.convert("RGB")
+    if regions is not None:
+        controls = {f"{index:02d}": control for index, control in enumerate(
+            (control for control in controls.values() if any(
+                region[0] <= control["box"][0] < control["box"][2] <= region[2]
+                and region[1] <= control["box"][1] < control["box"][3] <= region[3]
+                for region in regions)), 1)}
     draw = ImageDraw.Draw(image)
     try:
         font = ImageFont.truetype("DejaVuSansMono-Bold.ttf", 18)
@@ -214,6 +258,8 @@ def annotated_controls(image_path):
         draw.rectangle((x - width / 2 - 2, y - height / 2 - 2,
                         x + width / 2 + 2, y + height / 2 + 2), fill="#fff200", outline="#7400c9")
         draw.text((x - width / 2 - bx, y - height / 2 - by), identifier, font=font, fill="#111111")
+    if context_images:
+        image = _context_sheet(image, context_images)
     with tempfile.TemporaryDirectory(prefix="seth-controls-") as directory:
         path = Path(directory) / (Path(image_path).stem + "-controls.png")
         image.save(path)

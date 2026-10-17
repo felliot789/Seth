@@ -422,6 +422,7 @@ class WebInferenceClient(DecisionClient):
         self.progress = progress
         self.last_provider = None
         self.last_attempts = []
+        self.last_grounded = False
 
     @property
     def state_dir(self):
@@ -436,17 +437,25 @@ class WebInferenceClient(DecisionClient):
         adapter_type = QwenSiteAdapter if provider == "qwen" else SiteAdapter
         return adapter_type(provider, self.web.get("sites", {}).get(provider, {}))
 
+    @property
+    def supports_scroll_context(self):
+        return any(provider in ("gemini", "qwen") for provider in self.web.get("providers", ["gemini"]))
+
     def engine(self, provider):
         return self.web.get("sites", {}).get(provider, {}).get("engine", self.web.get("engine", "lightpanda"))
 
     def login_profile(self, provider):
-        return self.state_dir / provider / "native-profile"
+        owner = self.web.get("sites", {}).get(provider, {}).get("browser_profile", provider)
+        if not isinstance(owner, str) or owner not in SITES:
+            raise AIError(f"web.sites.{provider}.browser_profile must name a supported provider.")
+        return self.state_dir / owner / "native-profile"
 
     def native_state_file(self, provider):
         return self.state_dir / provider / "native-browser.json"
 
     def validate_config(self):
         self.last_provider, self.last_attempts = None, []
+        self.last_grounded = False
         providers = self.web.get("providers", ["gemini"])
         if (not isinstance(providers, list) or not providers or any(not isinstance(p, str) or p not in SITES for p in providers)
                 or len(set(providers)) != len(providers)):
@@ -463,6 +472,9 @@ class WebInferenceClient(DecisionClient):
                 raise AIError(f"web.sites.{provider} must be an object.")
             if self.engine(provider) not in ("lightpanda", "chromium"):
                 raise AIError(f"web.sites.{provider}.engine must be lightpanda or chromium.")
+            self.login_profile(provider)
+            if options.get("browser_profile", provider) != provider and self.engine(provider) != "chromium":
+                raise AIError(f"web.sites.{provider}.browser_profile sharing requires Chromium.")
             if not isinstance(options.get("model_label", SITES[provider]["model_label"]), str):
                 raise AIError(f"web.sites.{provider}.model_label must be a string.")
             if not isinstance(options.get("thinking_label", ""), str):
@@ -567,8 +579,10 @@ class WebInferenceClient(DecisionClient):
         state = self._run(provider, deadline, lambda adapter, page: adapter.prepare(page))
         return {"status": "ready", "provider": provider, "engine": self.engine(provider), "model": state["model"]}
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None):
+    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None):
         self.validate_config()
+        if context_images and prompt:
+            raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
         image_path = Path(image_path).resolve()
         width, height = screenshot_size(image_path)
         deadline = time.monotonic() + self.web.get("timeout_seconds", 240)
@@ -578,6 +592,9 @@ class WebInferenceClient(DecisionClient):
                 raise AIError("Web inference cancelled.", "cancelled")
             if time.monotonic() >= deadline:
                 break
+            if context_images and provider not in ("gemini", "qwen"):
+                self.last_attempts.append({"provider": provider, "error_code": "browser_context"})
+                continue
             if not self.cookie_file(provider).is_file():
                 self.last_attempts.append({"provider": provider, "error_code": "browser_login"})
                 continue
@@ -587,16 +604,18 @@ class WebInferenceClient(DecisionClient):
             self._report(f"Opening {provider}")
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
-                labeled = provider == "qwen" and not prompt
-                with annotated_controls(image_path) if labeled else nullcontext((image_path, None)) as (upload, controls):
-                    request_prompt = prompt or (build_control_prompt(width, height, controls) if labeled
+                labeled = not prompt and (provider == "qwen" or bool(context_images))
+                with annotated_controls(image_path, context_images=context_images,
+                                        regions=control_regions if context_images else None) if labeled else nullcontext((image_path, None)) as (upload, controls):
+                    request_prompt = prompt or (build_control_prompt(width, height, controls, scroll_context=bool(context_images)) if labeled
                                                 else self.adapter(provider).build_prompt(width, height))
                     raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
                         page, upload, request_prompt, self._report))
                     decision = self.parse_coordinates(raw, width, height, control_targets=controls)
-                if provider == "qwen" and decision is not None:
+                if decision is not None and (labeled or provider == "qwen"):
                     raw = json.dumps(decision if labeled else ground_decision(image_path, decision))
                 self.last_provider = provider
+                self.last_grounded = decision is not None and (labeled or provider == "qwen")
                 LOG.info("Web inference completed using %s", provider)
                 return raw
             except AIError as error:

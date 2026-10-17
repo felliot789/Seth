@@ -10,8 +10,8 @@ from trigger import TriggerError
 COLORS = {
     "idle": "#94a3b8", "capturing": "#60a5fa", "thinking": "#fbbf24",
     "selecting": "#c084fc", "done": "#4ade80", "dry_run": "#60a5fa",
-    "no_action": "#94a3b8", "low_confidence": "#fbbf24",
-    "error": "#fb7185", "cancelled": "#94a3b8",
+    "no_action": "#fb923c", "low_confidence": "#fb923c",
+    "error": "#f87171", "cancelled": "#94a3b8",
 }
 
 
@@ -38,7 +38,7 @@ class SethOverlay:
     def __init__(self):
         try:
             from PyQt6.QtCore import Qt
-            from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
+            from PyQt6.QtWidgets import QApplication, QLabel, QWidget
         except ImportError:
             raise TriggerError("The indicator needs PyQt6. Install requirements-overlay.txt.") from None
         # XWayland permits corner placement; native Wayland's xdg-shell does not.
@@ -54,27 +54,22 @@ class SethOverlay:
         self.window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.window.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.window.setFixedSize(188, 38)
-        panel = QWidget(self.window)
-        panel.setGeometry(0, 0, 188, 38)
+        self.window.setFixedSize(336, 38)
+        self.panel = panel = QWidget(self.window)
+        panel.setGeometry(0, 0, 336, 38)
         panel.setObjectName("statusPanel")
         panel.setStyleSheet("#statusPanel { background: rgba(20, 25, 36, 235); "
                             "border: 1px solid #374151; border-radius: 12px; }")
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(13, 0, 12, 0)
-        layout.setSpacing(9)
-        self.dot = QLabel()
-        self.dot.setFixedSize(8, 8)
-        self.label = QLabel()
+        self.dot = QLabel(self.window)
+        self.dot.setFixedSize(10, 10)
+        self.label = QLabel(panel)
+        self.label.setGeometry(13, 0, 294, 38)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.label.setStyleSheet("color: #e5e7eb; font-size: 12px; font-weight: 500; background: transparent;")
-        layout.addWidget(self.dot)
-        layout.addWidget(self.label)
-        layout.addStretch()
         self.progress = None
-        self.visible = True
+        self.display_mode = "full"
         self.update(("idle", "Idle"))
-        self.place()
-        self.window.show()
+        self._apply_mode()
         self.app.processEvents()
 
     def place(self):
@@ -83,31 +78,45 @@ class SethOverlay:
             area = screen.availableGeometry()
             self.window.move(area.right() - self.window.width() - 15, area.top() + 16)
 
-    def update(self, progress):
+    def update(self, progress, selection=None):
         if progress != self.progress:
             self.progress = progress
             self.progress_started = time.monotonic()
             state, label = progress
-            self.dot.setStyleSheet("border-radius: 4px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
+            self.dot.setStyleSheet("border-radius: 5px; background: " + COLORS.get(state, COLORS["idle"]) + ";")
         state, label = progress
         if state == "thinking":
             elapsed = max(0, int(time.monotonic() - self.progress_started))
             label = f"Waiting {elapsed // 60}:{elapsed % 60:02d}"
-        text = "Seth · " + label
+        text = " · ".join(["Seth"] + ([selection] if selection else []) + [label])
         if self.label.text() != text:
             self.label.setText(text)
 
-    def poll(self, progress):
-        self.update(progress)
+    def poll(self, progress, selection=None):
+        self.update(progress, selection)
         self.app.processEvents()
 
-    def toggle(self):
-        self.visible = not self.visible
+    @property
+    def visible(self):
+        return self.display_mode != "hidden"
+
+    def _apply_mode(self):
+        full = self.display_mode == "full"
+        self.window.setFixedSize(336 if full else 32, 38)
+        self.panel.setVisible(full)
+        # The dot's screen position is identical in Full and Dot modes.
+        self.dot.move(self.window.width() - 21, 14)
         if self.visible:
             self.place()
             self.window.show()
         else:
             self.window.hide()
+
+    def toggle(self):
+        self.display_mode = {"full": "hidden", "hidden": "dot", "dot": "full"}[self.display_mode]
+        self._apply_mode()
+        self.app.processEvents()
+        return self.display_mode
 
     def stop(self):
         self.window.close()

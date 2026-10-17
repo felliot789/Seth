@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from inference import AIError, DecisionClient, build_prompt, screenshot_size
+from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_size
 
 from settings import load_config
 
@@ -17,9 +17,12 @@ LOG = logging.getLogger("seth")
 
 
 class SethAIClient(DecisionClient):
+    supports_scroll_context = True
+
     def __init__(self, config=None, config_file=None):
         self.config = config if config is not None else load_config(config_file)
         self.api = self.config.get("api", {})
+        self.last_grounded = False
 
     @property
     def endpoint(self):
@@ -45,7 +48,22 @@ class SethAIClient(DecisionClient):
         if type(self.api.get("stream", False)) is not bool:
             raise AIError("api.stream must be true or false.")
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None):
+    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None):
+        self.last_grounded = False
+        if not context_images:
+            return self._analyze_screenshot(image_path, prompt, response_format)
+        if prompt:
+            raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
+        self.validate_config()
+        width, height = screenshot_size(image_path)
+        from control_targets import annotated_controls
+        with annotated_controls(image_path, context_images=context_images, regions=control_regions) as (upload, controls):
+            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=True), response_format)
+            decision = self.parse_coordinates(raw, width, height, control_targets=controls)
+        self.last_grounded = decision is not None
+        return json.dumps(decision) if decision is not None else raw
+
+    def _analyze_screenshot(self, image_path, prompt=None, response_format=None):
         self.validate_config()
         width, height = screenshot_size(image_path)
         if prompt is None:
