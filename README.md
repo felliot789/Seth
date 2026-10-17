@@ -252,6 +252,15 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
+The latest complete run on this host (2026-10-17) passed **202 tests** with all
+three integration flags enabled. Local browser fixtures verified combined-image
+uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
+context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
+read earlier question sections and returned the correct control IDs without VM
+answer input. The table-hover correction is covered by anonymous control glyphs
+from the actual stopped cycle. Detailed results and remaining live checks are
+recorded in [the validation notes](docs/qwen-validation.md).
+
 ## Running Seth
 
 Run one dry cycle, then exit:
@@ -456,6 +465,12 @@ Each column finishes at its bottom. Earlier sections become reference crops
 above the current answer screenshot in one private PNG upload. Only the live
 answer view receives numbered controls, and its original VM pixel coordinates
 remain authoritative. The current configuration bounds collection to eight views.
+
+For this configured quiz layout, keep the question header visible and the outer
+page position fixed. Scroll mode operates the question's inner columns; moving
+the outer page or changing zoom can move those columns outside the configured
+regions. Restore the layout before starting another cycle, and keep the VM page
+still while inference and selection run.
 
 All three providers use numbered control IDs when receiving scroll context;
 Seth resolves them to original live-frame coordinates and confirms each selection
