@@ -1,5 +1,31 @@
 # Development milestones
 
+## 2026-10-17 — Return to answers across scroll views
+
+- Scroll mode now indexes answer controls across the captured sections for API,
+  Gemini, and Qwen. Overlapping copies share stable IDs; graphical MCMA answers
+  and table rows no longer need to fit in the final view.
+- Validate one complete inference plan, group its targets by recorded view, and
+  return using bounded SDK drags. Recheck the VM, question, current content,
+  scrollbar geometry, restored content, and exact control before each click.
+- Measure small vertical offsets after a return and use fresh VM coordinates.
+  Confirm each selected glyph, preserve earlier selections, and stop immediately
+  on ambiguity, changed content, cancellation, or unconfirmed input. No retries,
+  automatic provider handoff, or Next/Submit clicks were added.
+- Added generated graph-MCMA and nine-row table exercises, independent two-panel
+  navigation, global-ID uploads for all three providers, no-input dry/uncertain
+  plans, and partial-failure coverage. A live five-view capture indexed all five
+  radio options and verified three return trips without answer input, including
+  two one-pixel restoration offsets.
+- A live Qwen categorization cycle then selected Benar / Salah / Benar at 90%
+  confidence, returning to the offscreen first row and back down for the others.
+  All three selections were visually confirmed from one inference request.
+- The original graph MCMA collected nine views and five distinct options. Qwen
+  chose two controls at 90% confidence; Seth returned to two earlier sections and
+  visually confirmed both selections, correcting a three-pixel return offset.
+- All 225 tests passed in 226.830 seconds with Lightpanda, Chromium, and native
+  login integrations enabled. Updated the README and validation notes.
+
 ## 2026-10-17 — Expand long-question capture
 
 - Diagnosed the shared API/Gemini/Qwen errors on the graph-based MCMA question:

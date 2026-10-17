@@ -17,6 +17,10 @@ class ScrollLimitError(VMError):
         self.required_views, self.max_views = required_views, max_views
 
 
+class ScrollNavigationError(VMError):
+    pass
+
+
 @dataclass(frozen=True)
 class Scrollbar:
     thumb: tuple
@@ -95,12 +99,28 @@ def find_scrollbar(image, region):
 
 
 @dataclass
+class ScrollView:
+    key: str
+    panel: int
+    frame: object
+    region: tuple
+    bar: Scrollbar
+    fraction: float
+    label: str
+
+
+@dataclass
 class ScrolledQuestion:
     frame: object
     contexts: list
     regions: list
     identity_box: tuple
     selected_controls: list = field(default_factory=list)
+    views: list = field(default_factory=list)
+
+    def navigate(self, config, capture, stop_event=None, report=lambda message: None):
+        from scroll_navigation import ScrollNavigator
+        return ScrollNavigator(self, config, capture, stop_event, report)
 
     def verify_identity(self, capture, stop_event=None):
         if stop_event is not None and stop_event.is_set():
@@ -183,7 +203,7 @@ class ScrollCollector:
             raise ScrollLimitError(required_views, limit)
         if not plans:
             return ScrolledQuestion(initial, [], regions, identity)
-        current, contexts = initial, []
+        current, contexts, views = initial, [], []
         for index, (region, original, intervals) in enumerate(plans, 1):
             for step in range(intervals + 1):
                 label = f'Reading {step + 1}/{intervals + 1}' if len(plans) == 1 else f'Reading {index}:{step + 1}/{intervals + 1}'
@@ -207,8 +227,8 @@ class ScrollCollector:
                 if moved is None or (step == 0 and moved.thumb[1] > moved.top + 20) or (
                         step == intervals and moved.thumb[3] < moved.bottom - 20):
                     raise VMError('Could not confirm the scrollbar reached the required endpoint; no answer input.')
-                # Each column finishes at its bottom; the final live frame supplies
-                # interactive targets. Earlier crops are read-only context.
+                views.append(ScrollView(f'{index}:{step}', index, current, region, moved, fraction,
+                                        f'Panel {index}, section {step + 1}/{intervals + 1}'))
                 if step < intervals:
                     contexts.append({'path': current.path, 'box': original.panel,
                                      'label': f'Context panel {index}, section {step + 1}/{intervals + 1}'})
@@ -222,4 +242,4 @@ class ScrollCollector:
         active_panels = {region: bar.panel for region, bar, _ in plans}
         answer_regions = [active_panels.get(box, (box[0], max(box[1], content_top), box[2], min(box[3], content_bottom)))
                           for box in regions]
-        return ScrolledQuestion(final, contexts, answer_regions, identity)
+        return ScrolledQuestion(final, contexts, answer_regions, identity, views=views)

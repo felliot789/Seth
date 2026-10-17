@@ -337,6 +337,64 @@ confirmed that a limit failure invokes neither inference nor answer clicks for
 API, Gemini, or Qwen. The VM had advanced to question 12 before the fix, so the
 original nine-view question has not been replayed live.
 
+## Selecting across captured answer views
+
+Scroll mode now assigns IDs to fully visible supported answer controls throughout
+the capture. Foreground alignment and the native thumb's movement identify
+overlapping copies, so one checkbox or table cell keeps one ID. The model sees
+badges in every section and returns one complete plan. The host validates all IDs,
+rejects repeated targets or two categories in one physical row, and groups the
+remaining selections by their recorded view. This applies to API, Gemini, and
+Qwen, using the existing Scroll toggle.
+
+Before a return, the current VM, header, question columns, scrollbar position,
+and previously confirmed visible selections must still match. Each return uses
+one SDK drag, waits for settled content, parks the pointer, and checks the
+restored view. A unique local vertical alignment accounts for native scrollbar
+rounding; only the freshly verified control coordinates reach the clicker. A
+changed target, ambiguous alignment, stuck scroll, cancellation, or failed
+selection confirmation stops the remaining plan without retrying input.
+
+Fourteen new generated-question tests passed in 36.709 seconds. They cover a
+five-option graph MCMA, a nine-row table spanning views, two independent panels,
+duplicate-ID rejection, same-row category conflicts, identical local coordinates
+in different views, cancellation, external scrolling, changed answer content,
+one-request execution, partial failure, and no return trips for dry/uncertain
+plans. The API/Gemini/Qwen client checks confirm global-ID annotation, original
+source preservation, private temporary-file cleanup, and retained view metadata.
+
+A live capture of the Windows question at number 12 collected five views and
+indexed five distinct radio options. Capture-only checks returned to sections
+`1:2`, `1:3`, and `1:4` and verified their targets without answer clicks. The first
+two returned one pixel from their original positions; local alignment measured
+that shift and resolved fresh control coordinates. Private artifacts are
+`captures/scroll-navigation-live-manifest.json`,
+`captures/scroll-navigation-live-upload.png`, and
+`captures/scroll-navigation-live-return-result.json`.
+
+A full live categorization cycle on question 14 collected five views and indexed
+six radio controls. Qwen returned **Benar / Salah / Benar** at confidence 0.90.
+The first row's controls were outside the final view. Seth returned to section
+`1:3` for that row, then to `1:4` for the remaining rows. All three clicks were
+confirmed visually, from one inference request. The cycle took 55.353 seconds
+from initial capture to completion; its decision, confidence, target IDs, view
+IDs, and confirmation flags are saved privately in
+`captures/scroll-navigation-live-q14-result.json`.
+
+A full live replay of the original graph MCMA at question 11 collected nine
+views and indexed five distinct checkboxes. Qwen chose the increasing
+velocity-time graph and constant acceleration-time graph at confidence 0.90.
+Seth returned to `1:1` and `1:3`, confirmed both selections visually, and accounted
+for a three-pixel offset on the second return. It made one inference request;
+the cycle took 88.362 seconds from initial capture to completion. The complete
+result is in `captures/scroll-navigation-live-mcma-result.json`. Both live-cycle
+confidences and their question numbers are also recorded in
+`captures/scroll-navigation-live-confidence.json`.
+
+All 225 tests passed in 226.830 seconds with Lightpanda, Chromium, and native
+login integrations enabled. The full report is kept privately at
+`captures/scroll-navigation-full-regression.log`.
+
 ## Local regression coverage
 
 `tests/test_qwen_web.py` drives a real Chromium against a local HTTP fixture.

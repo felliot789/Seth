@@ -263,7 +263,7 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
-The latest complete run on this host (2026-10-17) passed **209 tests** with all
+The latest complete run on this host (2026-10-17) passed **225 tests** with all
 three integration flags enabled. Local browser fixtures verified combined-image
 uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
 context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
@@ -274,6 +274,11 @@ recorded in [the validation notes](docs/qwen-validation.md). The latest run also
 covers PNG/JPEG preview conversion, API MIME detection, JPEG scroll references,
 and recovery from unsent attachment drafts. Replaying the actual large Gemini
 scroll image completed successfully after its preview was converted to JPEG.
+Scroll-back coverage includes graphical MCMA options, tall classification tables,
+overlap deduplication, independent panels, restored-control checks, and stopping
+after an unconfirmed click. Live Qwen cycles selected all three categorization
+rows across two views and two graph-MCMA options across two other views; every
+selection was visually confirmed. Both plans reported 90% confidence.
 
 ## Running Seth
 
@@ -475,10 +480,12 @@ capture for API, Gemini, or Qwen. In nonmanual runs,
 overlapping sections from native inner-panel scrollbars before inference.
 `regions` specifies normalized rectangles for the question columns;
 `identity_box` covers the question header, excluding the changing timer.
-Each column finishes at its bottom. Earlier sections become reference crops
-above the current answer screenshot in one private PNG upload. Only the live
-answer view receives numbered controls, and its original VM pixel coordinates
-remain authoritative. The current configuration bounds collection to twelve
+Capture finishes with each column at its bottom. All captured sections and the
+final screen share one private PNG upload. Supported answer controls receive
+stable numbered IDs across the sections: overlapping copies of one control
+have the same ID. One inference request can select graph-based MCMA options or
+categorize table rows spread across different scroll positions. The current
+configuration bounds collection to twelve
 views total across the columns, preserving at least 35% overlap. A question that
 needs more stops before scrolling or inference, with **Scroll limit** in Full
 status and the required/allowed counts in the log. The combined image also keeps
@@ -490,20 +497,28 @@ the outer page or changing zoom can move those columns outside the configured
 regions. Restore the layout before starting another cycle, and keep the VM page
 still while inference and selection run.
 
-All three providers use numbered control IDs when receiving scroll context;
-Seth resolves them to original live-frame coordinates and confirms each selection
-in a fresh capture. API/Gemini Single capture retains its coordinate behavior.
+All three providers use numbered control IDs when receiving scroll context.
+After validating the complete answer plan and confidence, Seth groups targets
+by recorded view and returns to each needed scroll position. It checks that the
+restored content matches its capture, finds the original control in the fresh
+frame, and confirms each selection visually. Small vertical offsets on return
+are measured locally before any click; contact-sheet coordinates are never used
+as VM click coordinates. Full status shows **Returning to section …** and selection
+counts. The existing Scroll toggle enables this behavior; no additional hotkey
+or model request is needed for the return trips. API/Gemini Single capture retains
+its coordinate behavior.
 The collector requires a recognizable native gray scrollbar thumb and matching
 arrow buttons within the configured columns. It checks the question header and
 VM identity throughout capture, and the visible question/answer pixels before
 each selection, allowing changes around earlier confirmed controls. A changed
 view, uncertain scrollbar, failed endpoint, or excess capture count stops input.
-All required new answer controls must fit in the final live view. The model is asked
-to abstain if additional required answer rows remain outside that view; selection
-across several answer viewports stays manual, including graph-based MCMA options
-spread across different scroll positions. The reference crops provide reading
-context, not additional clickable controls. The current three-row table fits in
-the final view even though its question does not.
+Overlapping answer views must align uniquely; ambiguous or repeated content stops
+the cycle rather than assigning guessed control identities. Two categories for
+the same physical table row and repeated selections of one control are rejected.
+Navigation failures show **Scroll stopped**, or **Stopped (n)** after input, with
+the reason in the listener log. A previously confirmed visible answer is checked
+again after returning to a view. Scrolling and clicks are never retried
+automatically, and Seth never presses Next or Submit.
 
 A table or multiple-answer plan must identify its type and provide unique row
 numbers or option labels. Every point is validated before the first click, and

@@ -49,7 +49,7 @@ class SethAIClient(DecisionClient):
         if type(self.api.get("stream", False)) is not bool:
             raise AIError("api.stream must be true or false.")
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None):
+    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
         self.last_grounded = False
         if not context_images:
             return self._analyze_screenshot(image_path, prompt, response_format)
@@ -58,8 +58,9 @@ class SethAIClient(DecisionClient):
         self.validate_config()
         width, height = screenshot_size(image_path)
         from control_targets import annotated_controls
-        with annotated_controls(image_path, context_images=context_images, regions=control_regions) as (upload, controls):
-            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=True), response_format)
+        with annotated_controls(image_path, context_images=context_images, regions=control_regions, scroll_targets=scroll_targets) as (upload, controls):
+            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=True,
+                                                                      scroll_navigation=scroll_targets is not None), response_format)
             decision = self.parse_coordinates(raw, width, height, control_targets=controls)
         self.last_grounded = decision is not None
         return json.dumps(decision) if decision is not None else raw

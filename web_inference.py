@@ -617,7 +617,7 @@ class WebInferenceClient(DecisionClient):
         state = self._run(provider, deadline, lambda adapter, page: adapter.prepare(page))
         return {"status": "ready", "provider": provider, "engine": self.engine(provider), "model": state["model"]}
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None):
+    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
         self.validate_config()
         if context_images and prompt:
             raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
@@ -644,8 +644,10 @@ class WebInferenceClient(DecisionClient):
             try:
                 labeled = not prompt and (provider == "qwen" or bool(context_images))
                 with annotated_controls(image_path, context_images=context_images,
-                                        regions=control_regions if context_images else None) if labeled else nullcontext((image_path, None)) as (upload, controls):
-                    request_prompt = prompt or (build_control_prompt(width, height, controls, scroll_context=bool(context_images)) if labeled
+                                        regions=control_regions if context_images else None,
+                                        scroll_targets=scroll_targets) if labeled else nullcontext((image_path, None)) as (upload, controls):
+                    request_prompt = prompt or (build_control_prompt(width, height, controls, scroll_context=bool(context_images),
+                                                                    scroll_navigation=scroll_targets is not None) if labeled
                                                 else self.adapter(provider).build_prompt(width, height))
                     raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
                         page, upload, request_prompt, self._report))

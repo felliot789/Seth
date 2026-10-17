@@ -195,6 +195,22 @@ def catalog_controls(image):
     return {f"{index:02d}": control for index, control in enumerate(controls, 1)}
 
 
+def _badge_controls(image, controls):
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype('DejaVuSansMono-Bold.ttf', 18)
+    except OSError:
+        font = ImageFont.load_default()
+    for identifier, control in controls.items():
+        left, top, right, bottom = control['box']
+        x, y = (left + right - 1) / 2, (top + bottom - 1) / 2
+        bx, by, br, bb = draw.textbbox((0, 0), identifier, font=font)
+        width, height = br - bx, bb - by
+        draw.rectangle((x - width / 2 - 2, y - height / 2 - 2,
+                        x + width / 2 + 2, y + height / 2 + 2), fill='#fff200', outline='#7400c9')
+        draw.text((x - width / 2 - bx, y - height / 2 - by), identifier, font=font, fill='#111111')
+
+
 def _context_sheet(answer, contexts):
     if not isinstance(contexts, list) or not 1 <= len(contexts) <= 12:
         raise AIError("Scroll context must contain one to twelve reference sections.", "browser_grounding")
@@ -207,7 +223,11 @@ def _context_sheet(answer, contexts):
         with Image.open(context["path"]) as source:
             if source.format not in ("PNG", "JPEG") or source.size != answer.size:
                 raise AIError("Scroll context must be PNG or JPEG and match the live answer frame dimensions.", "browser_grounding")
-            tiles.append((source.crop(box).convert("RGB"), str(context.get("label", "Question context"))[:100]))
+            source = source.convert('RGB')
+            if 'controls' in context:
+                _badge_controls(source, context['controls'])
+            suffix = ' (answer IDs)' if 'controls' in context else ' (reference only)'
+            tiles.append((source.crop(box), str(context.get("label", "Question context"))[:100] + suffix))
     positions, x, y, row_height = [], 0, 0, 0
     for tile, label in tiles:
         if x and x + tile.width > answer.width:
@@ -226,38 +246,28 @@ def _context_sheet(answer, contexts):
     except OSError:
         font = ImageFont.load_default()
     for x, y, tile, label in positions:
-        draw.text((x + 6, y + 5), label + " (reference only)", font=font, fill="#0f172a")
+        draw.text((x + 6, y + 5), label, font=font, fill="#0f172a")
         result.paste(tile, (x, y + 32))
-    draw.text((8, answer_y - 32), "LIVE ANSWER VIEW - choose only yellow badge IDs here", font=font, fill="#0f172a")
+    heading = ('FINAL VIEW - yellow IDs in all sections are selectable' if any('controls' in c for c in contexts)
+               else 'LIVE ANSWER VIEW - choose only yellow badge IDs here')
+    draw.text((8, answer_y - 32), heading, font=font, fill="#0f172a")
     result.paste(answer, (0, answer_y))
     return result
 
 
 @contextmanager
-def annotated_controls(image_path, *, context_images=None, regions=None):
+def annotated_controls(image_path, *, context_images=None, regions=None, scroll_targets=None):
     """Upload-only annotated copy; the original VM frame stays unchanged."""
     with Image.open(image_path) as original:
-        controls = catalog_controls(original)
+        controls = catalog_controls(original) if scroll_targets is None else scroll_targets['controls']
         image = original.convert("RGB")
-    if regions is not None:
+    if regions is not None and scroll_targets is None:
         controls = {f"{index:02d}": control for index, control in enumerate(
             (control for control in controls.values() if any(
                 region[0] <= control["box"][0] < control["box"][2] <= region[2]
                 and region[1] <= control["box"][1] < control["box"][3] <= region[3]
                 for region in regions)), 1)}
-    draw = ImageDraw.Draw(image)
-    try:
-        font = ImageFont.truetype("DejaVuSansMono-Bold.ttf", 18)
-    except OSError:
-        font = ImageFont.load_default()
-    for identifier, control in controls.items():
-        left, top, right, bottom = control["box"]
-        x, y = (left + right - 1) / 2, (top + bottom - 1) / 2
-        bx, by, br, bb = draw.textbbox((0, 0), identifier, font=font)
-        width, height = br - bx, bb - by
-        draw.rectangle((x - width / 2 - 2, y - height / 2 - 2,
-                        x + width / 2 + 2, y + height / 2 + 2), fill="#fff200", outline="#7400c9")
-        draw.text((x - width / 2 - bx, y - height / 2 - by), identifier, font=font, fill="#111111")
+    _badge_controls(image, controls if scroll_targets is None else scroll_targets['live_controls'])
     if context_images:
         image = _context_sheet(image, context_images)
     with tempfile.TemporaryDirectory(prefix="seth-controls-") as directory:

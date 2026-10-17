@@ -89,9 +89,19 @@ def build_prompt(width, height, *, coordinate_space="normalized_1000"):
     )
 
 
-def build_control_prompt(width, height, controls, *, scroll_context=False):
+def build_control_prompt(width, height, controls, *, scroll_context=False, scroll_navigation=False):
     kinds = {identifier: control["kind"] for identifier, control in controls.items()}
     context = (
+        'The uploaded image contains ONE question captured at different scroll positions. '
+        'Read EVERY panel/section in order and the final view to recover all question content and answer options. '
+        'Yellow badge IDs in ALL sections are selectable: the host will scroll back to the recorded control. '
+        'Overlapping captures repeat content; the SAME ID always means the SAME physical control. '
+        'Return each chosen ID only once, even when it appears in several sections. '
+        'For classification, number rows across the complete table, not separately in each section. '
+        'Evaluate graphical answer options by their diagrams as well as their labels. '
+        'Unbadged controls may be selected, clipped, or unsupported; do not assume their state from missing badges. '
+        'Never invent a badge ID or infer a click from image coordinates. '
+        if scroll_navigation else (
         "The uploaded image is a contact sheet of ONE question at different scroll positions. "
         "Read all upper context sections, in panel/section order, to recover the complete question. "
         "They may overlap or repeat content. Unbadged controls in those reference sections "
@@ -100,10 +110,11 @@ def build_control_prompt(width, height, controls, *, scroll_context=False):
         "can be selected. Every required new selection must be available in that live view; "
         "if a required control is outside it, return action none and explain that more answer rows "
         "must be exposed. Judge existing selected answers only in the live view. "
-        if scroll_context else ""
+        if scroll_context else "")
     )
     return (
-        context + f"Answer the question in the {width} by {height} {'LIVE ANSWER VIEW' if scroll_context else 'screenshot'}. "
+        context + (f'Original VM views are {width} by {height}; answer using the complete capture. '
+                   if scroll_navigation else f"Answer the question in the {width} by {height} {'LIVE ANSWER VIEW' if scroll_context else 'screenshot'}. ") +
         "Yellow numbered badges are local annotations marking unchecked controls. "
         "Each badge replaces only that control's appearance; it is not question content. "
         f"Available badge IDs and original control types: {json.dumps(kinds)}. "
@@ -124,7 +135,7 @@ def build_control_prompt(width, height, controls, *, scroll_context=False):
         "Include ALL correct unchecked options, even when only one remains. "
         "A single radio containing a combination of statements is still one answer. "
         "Identify the question type using its instructions and original control types. "
-        "Preserve existing selected answers, which have no yellow badge. "
+        "Preserve existing selected answers; judge their selected appearance, not just the lack of a badge. "
         "Use at most 10 selections and the lowest confidence across the plan. "
         'Return {"action":"none","confidence":0,"explanation":string} '
         "if any required answer or badge is uncertain, existing selections are incorrect, "
@@ -137,7 +148,7 @@ def build_control_prompt(width, height, controls, *, scroll_context=False):
 
 
 class DecisionClient:
-    def parse_coordinates(self, response_text, width, height, *, control_targets=None):
+    def parse_coordinates(self, response_text, width, height, *, control_targets=None, scroll_navigation=False):
         # Keep the no-action return contract while making an abstention
         # explainable to callers. A new parse must never reuse an old reason.
         self.last_no_action_explanation = None
@@ -176,6 +187,8 @@ class DecisionClient:
         if not isinstance(result.get("explanation"), str):
             raise AIError("Decision must include an explanation string.")
 
+        allow_views = scroll_navigation or (control_targets is not None and any('target_view' in c for c in control_targets.values()))
+
         def convert(point):
             if not isinstance(point, dict):
                 raise AIError("Each selection must be an object.")
@@ -189,7 +202,13 @@ class DecisionClient:
                 left, top, right, bottom = control["box"]
                 point["click_x"], point["click_y"] = round((left + right - 1) / 2), round((top + bottom - 1) / 2)
                 point["target_control"] = {"kind": control["kind"], "box": list(control["box"])}
+                if 'target_view' in control:
+                    point['target_view'] = control['target_view']
                 point.pop("model_point", None)
+            if not allow_views:
+                point.pop('target_view', None)
+            elif not isinstance(point.get('target_view'), str) or not point['target_view']:
+                raise AIError('Scrolled answer must identify a recorded control view.', 'browser_grounding')
             x, y = point.get("click_x"), point.get("click_y")
             if type(x) is not int or type(y) is not int:
                 raise AIError("Decision coordinates must be integers in the declared coordinate space.")
@@ -226,7 +245,7 @@ class DecisionClient:
                     if not isinstance(label, str) or not label.strip():
                         raise AIError("Multiple-answer selections require an option label.")
                     label = label.strip().casefold()
-                coordinates = (point["click_x"], point["click_y"])
+                coordinates = (point.get('target_view'), point["click_x"], point["click_y"])
                 if label in labels or coordinates in points:
                     raise AIError("Selection plan contains duplicate rows, options, or targets.")
                 labels.add(label)

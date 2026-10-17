@@ -16,7 +16,7 @@ from capture import SethCapture
 from clicker import SethClicker
 from hotkey import SethHotkey
 from settings import load_config
-from scroll_capture import ScrollLimitError
+from scroll_capture import ScrolledQuestion, ScrollLimitError, ScrollNavigationError
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
 
@@ -123,6 +123,7 @@ class SethEngine:
         result = {"status": "error"}
         completed_clicks = []
         question = None
+        navigation = None
         decision = None
         try:
             if self.stop_event.is_set():
@@ -144,11 +145,21 @@ class SethEngine:
                 frame = question.frame
                 if question.contexts:
                     LOG.info("Collected %s scroll context sections; live answer frame %s", len(question.contexts), frame.path)
+                    if isinstance(question, ScrolledQuestion) and question.views:
+                        navigation = question.navigate(self.config, self.capture, self.stop_event,
+                                                       report=lambda label: setattr(self, 'progress', ('capturing', label)))
+                        LOG.info('Indexed %s distinct answer controls across %s views', len(navigation.controls), len(question.views))
             LOG.info("Waiting for Seth to identify the answer selections...")
             self.progress = ("thinking", "Waiting")
-            raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
-                   if question is not None and question.contexts else self.ai.analyze_screenshot(frame.path))
-            decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
+            if navigation is not None:
+                raw = self.ai.analyze_screenshot(frame.path, context_images=navigation.contexts,
+                                                 control_regions=question.regions, scroll_targets=navigation.payload)
+                decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height, scroll_navigation=True)
+            else:
+                raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
+                       if question is not None and question.contexts else self.ai.analyze_screenshot(frame.path))
+                decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
+            plan = navigation.plan(decision) if navigation is not None and decision is not None else None
             if self.stop_event.is_set():
                 result = {"status": "cancelled"}
             elif decision is None:
@@ -166,7 +177,20 @@ class SethEngine:
             else:
                 self.progress = ("selecting", "Selecting")
                 grounded = getattr(self.ai, "last_grounded", False) or getattr(self.ai, "last_provider", None) == "qwen"
-                if decision["action"] == "select":
+                if navigation is not None:
+                    for selection in plan:
+                        target_frame, target = navigation.prepare(selection)
+                        self.progress = ('selecting', f'Selecting {len(completed_clicks) + 1}/{len(plan)}')
+                        self.capture.verify_target(target_frame, target['click_x'], target['click_y'])
+                        click = self.clicker.click(target_frame, target['click_x'], target['click_y'], self.stop_event)
+                        completed_clicks.append(click | {key: target[key] for key in
+                                                        ('target_id', 'target_view', 'row', 'choice', 'option') if key in target})
+                        self.capture.verify_selection(target_frame, target, self.stop_event)
+                        completed_clicks[-1]['selection_verified'] = True
+                        navigation.confirm(target)
+                        self.progress = ('selecting', f'Selected {len(completed_clicks)}/{len(plan)}')
+                    result = {'status': 'clicked', 'decision': decision, 'click_count': len(completed_clicks), 'clicks': completed_clicks}
+                elif decision["action"] == "select":
                     for selection in decision["selections"]:
                         if self.stop_event.is_set():
                             raise VMError("Cycle cancelled; no further selections.")
@@ -202,6 +226,8 @@ class SethEngine:
                     result["status"] = "cancelled"
             elif isinstance(error, ScrollLimitError):
                 result.update(error_code="scroll_limit", required_views=error.required_views, max_views=error.max_views)
+            elif isinstance(error, ScrollNavigationError):
+                result['error_code'] = 'scroll_navigation'
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
             result = {"status": "error", "error": "Unexpected cycle failure; no further action will be attempted."}
@@ -215,6 +241,8 @@ class SethEngine:
                 label = "API offline"
             if result.get("error_code") == "scroll_limit":
                 label = "Scroll limit"
+            if result.get('error_code') == 'scroll_navigation':
+                label = 'Scroll stopped'
             if result.get("error_code", "").startswith("browser_"):
                 label = {"browser_timeout": "Web timeout", "browser_login": "Web sign-in",
                          "browser_limit": "Web limit", "browser_busy": "Browser busy",
@@ -238,6 +266,9 @@ class SethEngine:
         if question is not None and question.contexts:
             result["context_sections"] = len(question.contexts)
             result["capture_path"] = str(question.frame.path)
+        if navigation is not None:
+            result['scroll_navigation'] = True
+            result['returned_views'] = navigation.returned_views
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
