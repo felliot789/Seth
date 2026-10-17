@@ -195,6 +195,22 @@ class ControlTargetTests(unittest.TestCase):
                     with annotated_controls(source, context_images=[{"path": path, "box": box}]):
                         self.fail("Invalid context should never be uploaded")
 
+    def test_jpeg_live_and_reference_images_pack_as_png_without_changing_original_pixels(self):
+        draw_control(self.image,'radio')
+        with tempfile.TemporaryDirectory() as root:
+            source=Path(root)/'question.jpg'
+            self.image.save(source,format='JPEG',quality=100,subsampling=0)
+            original=source.read_bytes()
+            with annotated_controls(source,context_images=[{'path':source,'box':(0,0,100,35)}]) as (upload,controls):
+                with Image.open(upload) as packed:
+                    self.assertEqual(packed.format,'PNG')
+                    self.assertGreater(packed.height,self.image.height)
+                decision=DecisionClient().parse_coordinates(
+                    '{"action":"click","target_id":"01","confidence":0.95,"explanation":"A"}',
+                    *self.image.size,control_targets=controls)
+                self.assertEqual((decision['click_x'],decision['click_y']),(60,60))
+            self.assertEqual(source.read_bytes(),original)
+
     def test_ids_resolve_single_classification_and_multiple_answer_plans(self):
         controls = {"01": {"kind": "radio", "box": [49, 29, 71, 51]},
                     "02": {"kind": "checkbox", "box": [49, 89, 71, 111]},

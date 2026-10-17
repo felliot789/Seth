@@ -205,8 +205,8 @@ def _context_sheet(answer, contexts):
                 or not 0 <= box[0] < box[2] <= answer.width or not 0 <= box[1] < box[3] <= answer.height):
             raise AIError("Scroll context has an invalid crop rectangle.", "browser_grounding")
         with Image.open(context["path"]) as source:
-            if source.format != "PNG" or source.size != answer.size:
-                raise AIError("Scroll context must match the live answer frame dimensions.", "browser_grounding")
+            if source.format not in ("PNG", "JPEG") or source.size != answer.size:
+                raise AIError("Scroll context must be PNG or JPEG and match the live answer frame dimensions.", "browser_grounding")
             tiles.append((source.crop(box).convert("RGB"), str(context.get("label", "Question context"))[:100]))
     positions, x, y, row_height = [], 0, 0, 0
     for tile, label in tiles:

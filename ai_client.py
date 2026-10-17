@@ -1,6 +1,7 @@
 """OpenAI-compatible vision requests and strict, screenshot-relative decisions."""
 
 import base64
+import io
 import json
 import logging
 import math
@@ -8,7 +9,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_size
+from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_info, screenshot_size
 
 from settings import load_config
 
@@ -65,17 +66,18 @@ class SethAIClient(DecisionClient):
 
     def _analyze_screenshot(self, image_path, prompt=None, response_format=None):
         self.validate_config()
-        width, height = screenshot_size(image_path)
+        with open(image_path, "rb") as stream:
+            data = stream.read()
+        (width, height), mime = screenshot_info(io.BytesIO(data))
         if prompt is None:
             prompt = build_prompt(width, height)
-        with open(image_path, "rb") as stream:
-            encoded = base64.b64encode(stream.read()).decode("ascii")
+        encoded = base64.b64encode(data).decode("ascii")
         payload = {
             "model": self.api["model"],
             "stream": self.api.get("stream", False),
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + encoded}},
             ]}],
         }
         fmt = response_format if response_format is not None else self.api.get("response_format")

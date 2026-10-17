@@ -13,12 +13,19 @@ class AIError(RuntimeError):
         self.code = code
 
 
-def screenshot_size(image_path):
-    with Image.open(image_path) as image:
-        if image.format != "PNG":
-            raise AIError("Expected a PNG screenshot.")
+def screenshot_info(image_source):
+    """Inspect actual image bytes, independently of the filename extension."""
+    with Image.open(image_source) as image:
+        mime = {"PNG": "image/png", "JPEG": "image/jpeg"}.get(image.format)
+        if mime is None:
+            raise AIError("Expected a PNG or JPEG screenshot.")
+        size = image.size
         image.verify()
-        return image.size
+        return size, mime
+
+
+def screenshot_size(image_path):
+    return screenshot_info(image_path)[0]
 
 
 def build_prompt(width, height, *, coordinate_space="normalized_1000"):

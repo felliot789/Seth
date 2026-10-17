@@ -1,5 +1,24 @@
 # Development milestones
 
+## 2026-10-17 — PNG/JPEG uploads and draft recovery
+
+- Fixed Gemini/Scroll waiting at upload after Gemini converted a large PNG to a
+  JPEG preview. The timed-out request never reached Send and produced no VM input.
+- Gemini and Qwen accept supported PNG/JPG/JPEG preview names, requiring the full
+  original stem and allowing only the bounded six-character hex suffix.
+- API requests detect image MIME from the actual bytes, including misnamed files.
+  PNG/JPEG input and JPEG scroll references are supported; contact sheets use PNG.
+- Recover unsent image drafts before another cycle. Gemini's pending attachment
+  is explicitly removed after revealing its close control, and the old composer
+  is cleared. Submissions and answer clicks are never retried automatically.
+- Replayed the real 1920 × 1986, three-section image through Gemini. Its JPEG
+  preview was accepted and Argon/Medium returned a valid four-option MCMA plan
+  at confidence 0.99 in 133.039 seconds, with no VM answer input.
+- The user's API/Scroll retry also completed after the hover fix: it preserved
+  the first answer and visually confirmed the two remaining selections at 0.95.
+- All 209 tests passed in 179.937 seconds with Lightpanda, Chromium, and native
+  login integrations enabled. Both live provider sessions remain authenticated.
+
 ## 2026-10-17 — Clear table hover before selection confirmation
 
 - Fixed API/Scroll stopping after one successful selection because the hovered

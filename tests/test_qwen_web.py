@@ -102,6 +102,7 @@ async function uploadFile(event){
  const preview=document.createElement('div');preview.className='vision-item-container vision-item-container-uploading';
  const image=document.createElement('img');image.className='vision-item-image';
  image.alt=scenario==='wrong_file'?'other.png':file.name;
+ if(scenario==='jpeg_suffix')image.alt=file.name.replace(/\.(png|jpe?g)$/i,'_16fa84.jpg');
  const progress=document.createElement('span');progress.className='anticon anticon-spin vision-item-loading-icon';
  preview.append(image,progress);files.replaceChildren(preview);send.disabled=!draft;
  // Even a preview and enabled Send can precede completion of image processing.
@@ -334,6 +335,35 @@ class QwenChromiumIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.uploads), before + 1)
         self.assertEqual(hashlib.sha256(self.uploads[-1]).digest(),
                          hashlib.sha256(self.image.read_bytes()).digest())
+
+    def test_png_and_jpeg_sources_accept_converted_preview_after_one_upload(self):
+        for image_format,suffix in (('PNG','.png'),('JPEG','.jpg'),('JPEG','.jpeg')):
+            with self.subTest(image_format=image_format,suffix=suffix):
+                self.image=self.image.with_suffix(suffix)
+                Image.new('RGB',(320,200),'white').save(self.image,format=image_format)
+                before=len(self.uploads)
+                with self.browser() as page:
+                    raw=self.adapter('jpeg_suffix').exchange(page,self.image,'Read this screenshot.',lambda label:None)
+                    self.assertEqual(json.loads(raw)['action'],'click')
+                    self.assertEqual(page.evaluate('window.submissions'),1)
+                self.assert_uploaded_image(before)
+
+    def test_pending_unsent_image_is_cleared_before_the_next_cycle(self):
+        adapter=self.adapter('jpeg_suffix')
+        with self.browser() as page:
+            adapter.prepare(page)
+            page.evaluate("""(()=>{const e=document.querySelector('textarea');
+Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,'Old draft');
+e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
+            adapter.attach(page,self.image)
+            self.assertEqual(page.evaluate('window.submissions'),0)
+            before=len(self.uploads)
+            raw=adapter.exchange(page,self.image,'Fresh request',lambda label:None)
+            self.assertEqual(json.loads(raw)['action'],'click')
+            self.assertEqual(page.evaluate('window.newChats'),1)
+            self.assertEqual(page.evaluate('window.submissions'),1)
+            self.assertEqual(len(self.uploads),before+1)
+            self.assertIn('Fresh request',adapter.snapshot(page)['users'][0])
 
     def test_upload_control_can_mount_after_the_chat_editor(self):
         before = len(self.uploads)

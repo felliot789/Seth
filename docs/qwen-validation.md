@@ -185,7 +185,7 @@ correct false/true/false plan, IDs `02`/`03`/`06`, at confidence 0.9 in 39.851
 seconds. It sent no answer input. A subsequent user-triggered cycle collected
 two context sections and returned the same plan at confidence 0.8. That fell
 below the unchanged 0.85 threshold, so Seth selected nothing. A sufficiently
-confident triggered selection remains unverified on this live table.
+confident Qwen selection remains unverified on this live table.
 
 Capture is bounded by configured columns and a maximum of eight views. Native
 gray thumbs with up/down arrows are required; unsupported/custom scrollbar
@@ -261,13 +261,57 @@ checks without restarting the signed-in browser. Keep the shared window open or
 minimized. Closing it affects both providers.
 
 All 202 local tests passed in 143.684 seconds with the three integration flags.
-A fresh API/Scroll answer cycle remains pending after the hover correction.
+The next user-triggered API/Scroll cycle completed at 07:14:38 on 2026-10-17.
+It collected four context sections, preserved the first answered row, and
+selected the two remaining rows at confidence 0.95. Both selections were
+confirmed in fresh captures, validating the table-hover correction in the VM.
 
 The live Gemini inference-only probe uploaded one combined PNG whose reference
 section contained a code absent from the answer view. Argon/Medium selected the
 correct badge `02` at confidence 1.0 in 14.709 seconds; local ID resolution
 returned `(100, 380)` in the original answer frame. No VM answer input was sent.
 The private result is saved in `captures/gemini-scroll-probe-result.json`.
+
+## PNG/JPEG preview conversion and unsent drafts
+
+The user-triggered Gemini/Scroll cycle at 07:15:00 on 2026-10-17 reached upload
+completion, but Gemini converted the large PNG into a preview ending
+`-controls_16fa84.jpg`. The adapter only accepted a `.png` preview, so it waited
+for 240 seconds without pressing Send. DOM inspection confirmed one completed
+attachment, enabled Send, no submitted user turn, and no model response. No VM
+answer input was sent.
+
+Gemini and Qwen now accept PNG/JPG/JPEG preview extensions with the exact source
+stem and an optional six-character hexadecimal suffix. Wrong stems, malformed
+suffixes, additional extensions, and unsupported formats remain rejected. The
+API inspects the same bytes it sends and sets the PNG or JPEG MIME type from
+their contents, including when the filename extension differs. JPEG reference
+and answer images can also be packed into a PNG scroll-context contact sheet.
+
+Gemini retained this unsent image even after New chat was clicked. Recovery now
+reveals the attachment's close button when it is hidden until hover, removes
+that one draft attachment, and clears the old composer. The live stuck draft
+was cleared successfully without submitting it. Qwen's new-chat path also
+resets a pending unsent image before another upload. This does not retry an
+ambiguous submission to either provider.
+
+A live replay rebuilt the failed three-section context image at 1920 × 1986
+pixels. Gemini again converted the PNG preview to `-controls_176b3e.jpg`; Seth
+recognized it, confirmed upload completion and enabled Send, and submitted once.
+Argon/Medium returned a valid four-option MCMA plan at confidence 0.99 in
+133.039 seconds. The plan resolved IDs `01`–`04` to the original live-frame
+checkbox coordinates. This inference-only replay sent no VM answer input; its
+result is saved privately in `captures/gemini-large-format-probe-result.json`.
+
+All 209 local tests passed in 179.937 seconds with Lightpanda, Chromium, and
+native-login integration suites enabled. Coverage includes converted preview
+names, single submission after draft recovery, a close control hidden until
+hover, original-byte upload identity, PNG/JPEG API MIME detection in both normal
+and streamed requests, mismatched filename extensions, unsupported formats, and
+JPEG scroll reference packing. Qwen's PNG/JPG/JPEG source and preview-conversion
+paths passed against its real-Chromium local fixture; a converted JPEG preview
+was observed on live Gemini. Both signed-in provider sessions passed a final
+model check.
 
 ## Local regression coverage
 

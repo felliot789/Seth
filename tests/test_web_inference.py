@@ -83,13 +83,21 @@ class WebClientTests(unittest.TestCase):
         with self.assertRaises(AIError):
             self.client.validate_config()
 
-    def test_gemini_preview_renaming_stays_bound_to_the_original_filename(self):
-        adapter = SiteAdapter("gemini")
-        for label in ("question.png", "Preview question_456f82.png close attachment"):
-            self.assertTrue(adapter.attachment_matches(label, self.image))
-        for label in ("other.png", "otherquestion.png", "question.png.extra", "question_wrong.png", "question_zzzzzz.png"):
-            self.assertFalse(adapter.attachment_matches(label, self.image))
-        self.assertFalse(SiteAdapter("chatgpt").attachment_matches("question_456f82.png", self.image))
+    def test_gemini_and_qwen_preview_conversion_preserves_exact_source_identity(self):
+        for provider in ('gemini','qwen'):
+            adapter = SiteAdapter(provider)
+            for source in (self.image, self.image.with_suffix('.jpg'), self.image.with_suffix('.jpeg'), self.image.with_suffix('.PNG')):
+                for label in ('question.png', 'Preview question_456f82.png close attachment',
+                              'question.jpg', 'question_16fa84.jpg', 'question_456f82.jpeg', 'question_456f82.JPG'):
+                    with self.subTest(provider=provider,source=source.name,label=label):
+                        self.assertTrue(adapter.attachment_matches(label, source))
+                for label in ('other.png', 'otherquestion_456f82.jpg', 'question.png.extra',
+                              'question_wrong.png', 'question_zzzzzz.png', 'question_12345.jpg',
+                              'question_456f82.jpg.extra', 'question_456f82_more.jpg', 'question_456f82.webp'):
+                    with self.subTest(provider=provider,source=source.name,label=label):
+                        self.assertFalse(adapter.attachment_matches(label, source))
+        for label in ('question_456f82.png','question_456f82.jpg','question.jpg'):
+            self.assertFalse(SiteAdapter('chatgpt').attachment_matches(label, self.image))
 
     def test_selected_model_and_thinking_level_must_both_match(self):
         adapter = SiteAdapter("gemini", {"model_label": "Argon", "thinking_label": "Medium"})
@@ -380,9 +388,10 @@ const scenario=SCENARIO;
 const answer=JSON.stringify(scenario==='control_ids'
  ?{action:'click',target_id:'01',confidence:0.99,explanation:'Center'}
  :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
-window.submissions=0;
+window.submissions=0;window.attachmentRemovals=0;
 document.querySelector('#new-chat').onclick=()=>{
- document.querySelectorAll('.user,.response,.attachment,#stop').forEach(e=>e.remove());
+ document.querySelectorAll('.user,.response,#stop').forEach(e=>e.remove());
+ if(scenario!=='draft_persists')document.querySelectorAll('.attachment').forEach(e=>e.remove());
  document.querySelector('#editor').textContent='';document.querySelector('#send').disabled=true;
  window.completed=false;
 };
@@ -406,11 +415,13 @@ document.querySelector('#file').onchange=async()=>{
  const file=document.querySelector('#file').files[0];
  const preview=document.createElement('div');preview.className='attachment';
  preview.textContent=scenario==='wrong_file'?'other.png':file.name;
- if(scenario==='suffix'){
+ if(scenario==='suffix'||scenario==='jpeg_suffix'||scenario==='draft_persists'){
    preview.textContent='';preview.setAttribute('aria-describedby','preview-description');
    const description=document.createElement('span');description.id='preview-description';description.hidden=true;
-   description.textContent=file.name.replace('.png','_456f82.png');document.body.append(description);
+   description.textContent=file.name.replace('.png',scenario==='suffix'?'_456f82.png':'_456f82.jpg');document.body.append(description);
  }
+ const remove=document.createElement('button');remove.className='remove';remove.textContent='Remove attachment';
+ remove.onclick=()=>{window.attachmentRemovals++;preview.remove();};preview.append(document.createTextNode(' '),remove);
  preview.insertAdjacentHTML('beforeend','<span class=uploading>Uploading</span>');
  document.body.append(preview);
  const result=await fetch('/upload',{method:'POST',body:file});
@@ -463,6 +474,7 @@ if(scenario==='menu'||scenario==='raf_menu'){
 TEST_SELECTORS = {
     "editor": "#editor", "model": "#model", "file": "#file", "upload": "#upload",
     "upload_item": "#upload-item", "attachment": ".attachment", "upload_busy": ".uploading",
+    "remove_attachment": ".attachment .remove",
     "send": "#send", "user": ".user", "response": ".response", "answer": ".markdown",
     "complete": ".copy", "stop": "#stop", "error": '[role="alert"]',
     "new_chat": "#new-chat",
@@ -523,7 +535,7 @@ class LightpandaIntegrationTests(unittest.TestCase):
         return adapter
 
     def test_real_png_upload_and_completed_answer(self):
-        for scenario in ("normal", "code", "suffix", "menu"):
+        for scenario in ("normal", "code", "suffix", "jpeg_suffix", "menu"):
             with self.subTest(scenario=scenario), self.browser() as page:
                 before = len(self.uploads)
                 raw = self.adapter(scenario).exchange(page, self.image, build_prompt(320, 200), lambda label: None)
@@ -533,6 +545,28 @@ class LightpandaIntegrationTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(self.uploads[-1]).digest(), hashlib.sha256(self.image.read_bytes()).digest())
                 decision = WebInferenceClient({}).parse_coordinates(raw, 320, 200)
                 self.assertEqual((decision["click_x"], decision["click_y"]), (160, 100))
+
+    def test_unsent_attachment_from_an_earlier_attempt_is_cleared_before_a_new_upload(self):
+        adapter = self.adapter('draft_persists')
+        with self.browser(timeout=12) as page:
+            adapter.prepare(page)
+            page.set_file('#file',self.image)
+            adapter.wait_attachment(page,self.image)
+            self.assertEqual(page.evaluate('window.submissions'),0)
+            self.assertEqual(len(adapter.snapshot(page)['attachments']),1)
+            if self.runtime_engine=='chromium':
+                page.evaluate("""(()=>{const s=document.createElement('style');
+s.textContent='.attachment .remove{visibility:hidden}.attachment:hover .remove{visibility:visible}';
+document.head.append(s);})()""")
+                self.assertEqual(page.evaluate("getComputedStyle(document.querySelector('.attachment .remove')).visibility"),'hidden')
+            before = len(self.uploads)
+            page.reuse_page = True
+            raw = adapter.exchange(page,self.image,'Fresh question',lambda label:None)
+            self.assertEqual(page.evaluate('window.submissions'),1)
+            self.assertEqual(page.evaluate('window.attachmentRemovals'),1)
+            self.assertEqual(len(self.uploads),before+1)
+            self.assertIn('Fresh question',adapter.snapshot(page)['users'][0])
+            self.assertEqual(WebInferenceClient({}).parse_coordinates(raw,320,200)['click_x'],160)
 
     def test_client_scroll_context_upload_uses_ids_and_retains_live_coordinates(self):
         with Image.open(self.image) as image:

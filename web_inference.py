@@ -33,6 +33,7 @@ SITES = {
             "upload": 'button[aria-label="Upload & tools"], button[aria-label="Upload and tools"], button[aria-label="Open upload file menu"]',
             "upload_item": '[role="menuitem"]',
             "attachment": 'uploader-file-preview',
+            "remove_attachment": 'uploader-file-preview button[aria-label="close attachment"]',
             "upload_busy": 'uploader-file-preview [role="progressbar"], uploader-file-preview mat-spinner, uploader-file-preview mat-progress-spinner',
             "send": 'button[aria-label="Send message"], button[aria-label="Submit"]',
             "user": 'user-query',
@@ -193,17 +194,50 @@ return {url:location.href,editors:all(s.editor).length,
         if getattr(page, "reuse_page", False):
             state = self.snapshot(page)
             self.check_state(state)
-            if state["users"] or state["responses"]:
+            if state["users"] or state["responses"] or state["attachments"]:
                 self.click(page, self.selectors.get("new_chat", '[data-seth-missing-new-chat]'))
                 starting_new = True
         else:
             page.navigate(self.site["url"])
         state = self.wait_state(page, lambda s: s["editors"] and s["modelCount"] and (
-            not starting_new or not (s["users"] or s["responses"])))
+            not starting_new or not (s["users"] or s["responses"]) and (
+                self.name == "gemini" or not s["attachments"])))
+        # Gemini can retain an unsent attachment even when New chat is clicked.
+        # Clear that one draft explicitly; never submit it or duplicate an upload.
+        if starting_new and self.name == "gemini" and state["attachments"]:
+            if len(state["attachments"]) != 1:
+                raise AIError(f"{self.name}: expected one pending draft attachment.", "browser_layout")
+            self.reveal_draft_remove(page)
+            self.click(page, self.selectors["remove_attachment"])
+            self.fill_composer(page, "")
+            state = self.wait_state(page, lambda s: s["editors"] and s["modelCount"]
+                                    and not (s["users"] or s["responses"] or s["attachments"]))
         if state["editors"] != 1 or state["users"] or state["responses"] or state["attachments"]:
             raise AIError(f"{self.name}: expected one empty chat and no existing attachment.", "browser_layout")
         self.verify_model(state)
         return state
+
+    def reveal_draft_remove(self, page):
+        selector = self.selectors["remove_attachment"]
+        if dom(page, "return all(args[0]).length;", selector) != 0:
+            return
+        position = dom(page, """
+const e=all(args[0]);if(e.length!==1)return null;
+const b=e[0].getBoundingClientRect();
+return b.width>0&&b.height>0?{x:b.x+b.width/2,y:b.y+b.height/2}:null;
+""", self.selectors["attachment"])
+        if position is None:
+            raise AIError(f"{self.name}: pending draft attachment is not available.", "browser_layout")
+        page.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "buttons": 0, **position})
+        deadline = time.monotonic() + 3
+
+        def revealed():
+            if dom(page, "return all(args[0]).length;", selector):
+                return True
+            if time.monotonic() >= deadline:
+                raise AIError(f"{self.name}: draft attachment removal did not become available.", "browser_layout")
+            return False
+        page.wait(revealed)
 
     def click(self, page, selector, matching_text=None):
         result = dom(page, """
@@ -247,16 +281,15 @@ inputs[0].setAttribute('data-seth-upload',args[1]);return '[data-seth-upload="'+
         self.verify_model(state)
 
     def attachment_matches(self, label, image_path):
-        # Gemini's image preprocessing adds six hexadecimal characters before the extension.
-        # Require the complete original stem and extension, not an arbitrary image.
+        # Web image preprocessing may append six hex characters and transcode
+        # PNG/JPEG previews. Keep the full original stem and bounded image suffix
+        # rather than accepting a generic attachment or another question's file.
         name = re.escape(image_path.name)
-        if self.name == "gemini":
-            name = re.escape(image_path.stem) + r"(?:_[0-9a-f]{6})?" + re.escape(image_path.suffix)
+        if self.name in ("gemini", "qwen") and image_path.suffix.lower() in (".png", ".jpg", ".jpeg"):
+            name = re.escape(image_path.stem) + r"(?:_[0-9a-f]{6})?\.(?i:png|jpe?g)"
         return bool(re.search(r"(?<![\w.-])" + name + r"(?![\w.-])", label))
 
-    def exchange(self, page, image_path, prompt, report):
-        self.prepare(page)
-        request_id = "Seth request " + uuid.uuid4().hex
+    def fill_composer(self, page, text):
         filled = dom(page, """
 const inputs=all(args[0]);if(inputs.length!==1)return false;
 const e=inputs[0];e.focus();
@@ -270,9 +303,14 @@ if(e.tagName==='TEXTAREA'||e.tagName==='INPUT'){
     e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:args[1]}));
 }
 return true;
-""", self.selectors["editor"], request_id + "\n" + prompt)
+""", self.selectors["editor"], text)
         if not filled:
             raise AIError(f"{self.name}: prompt composer is missing or ambiguous.", "browser_layout")
+
+    def exchange(self, page, image_path, prompt, report):
+        self.prepare(page)
+        request_id = "Seth request " + uuid.uuid4().hex
+        self.fill_composer(page, request_id + "\n" + prompt)
         report(f"Uploading to {self.name}")
         self.attach(page, image_path)
         state = self.snapshot(page)
@@ -642,7 +680,7 @@ def main(argv=None):
     modes.add_argument("--login", action="store_true", help="Sign in interactively using an installed browser and transfer the session locally")
     modes.add_argument("--close-browser", action="store_true", help="Close this provider's managed Chromium session normally")
     modes.add_argument("--check", action="store_true", help="Check session, model and empty chat without uploading")
-    modes.add_argument("--image", type=Path, help="Upload a PNG and print a validated decision; never click the VM")
+    modes.add_argument("--image", type=Path, help="Upload a PNG or JPEG and print a validated decision; never click the VM")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:

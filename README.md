@@ -107,6 +107,10 @@ or `null` to omit it. A single complete Markdown JSON code fence is accepted for
 gateways that add one. Local JSON, action, coordinate, and confidence validation
 still applies; surrounding prose and multiple JSON fragments are rejected.
 
+Inference input accepts PNG and JPEG. API requests inspect the image bytes and
+set `image/png` or `image/jpeg` accordingly, including when a file's extension
+differs from its contents. Scroll contact sheets are generated as PNG.
+
 ## Browser web inference (experimental)
 
 Seth also has a web backend for sending the captured PNG to a model's web chat.
@@ -133,7 +137,8 @@ Exported cookies are not re-imported over the native profile.
 
 To select Lightpanda for a provider, set its `engine` to `"lightpanda"` and run
 `.venv/bin/python web_inference.py --install`. This is also the default engine for
-providers without an override. The verified official binary lives under
+providers without an override. Remove any shared `browser_profile` override
+when switching away from Chromium. The verified official binary lives under
 `~/.local/share/seth/runtime/lightpanda/`, separate from
 system packages. Each downloaded version has its SHA-256 recorded in
 `release.json`; `current` selects the installed version. Startup never downloads
@@ -196,8 +201,8 @@ Netscape cookies without pasting session secrets into chat:
 .venv/bin/python web_inference.py --provider gemini --image captures/question.png
 ```
 
-The image command uploads to exactly the named provider and prints a validated
-decision; it never sends VM input. Cookies are filtered to that provider's domains
+The image command accepts PNG or JPEG, uploads to exactly the named provider,
+and prints a validated decision; it never sends VM input. Cookies are filtered to that provider's domains
 and stored in private files under `~/.local/share/seth/web/<provider>/`. Updated cookies are
 saved atomically after successful operations when time and cancellation allow.
 Failed operations preserve the imported session. Cookie import does not
@@ -214,7 +219,7 @@ hotkey listener starts at API regardless of that saved setting. An explicit
 changes; manual selections last until the listener restarts.
 
 Each attempt starts an empty chat using the site's new-chat control when reusing
-a live session, and requires an attachment matching the PNG's filename,
+a live session, and requires an attachment matching the image's filename,
 upload completion, the configured model, the current request's user message,
 and a completed answer. A one-second stable answer and absence of a generation
 control supplement the completion signal. The shared JSON, confidence, geometry,
@@ -223,6 +228,12 @@ cycle. Nonmanual web runs can fall through to the next configured provider on
 errors, and only the first valid answer reaches the clicker. The hotkey listener
 never falls through: change providers yourself and trigger again. An explicit
 `action: "none"` is accepted as an abstention.
+
+Gemini can convert a large PNG into a JPEG preview during upload. Gemini and
+Qwen accept PNG/JPG/JPEG preview extensions and an optional six-character hex
+suffix while requiring the full original filename stem. Upload completion and
+Send readiness are still checked. A pending unsent image is removed before a
+new cycle; Gemini's attachment close control is revealed when necessary.
 
 `web.timeout_seconds` is the total fallback budget (240 by default).
 `web.attempt_timeout_seconds` caps an individual attempt (150 by default;
@@ -252,14 +263,17 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
-The latest complete run on this host (2026-10-17) passed **202 tests** with all
+The latest complete run on this host (2026-10-17) passed **209 tests** with all
 three integration flags enabled. Local browser fixtures verified combined-image
 uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
 context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
 read earlier question sections and returned the correct control IDs without VM
 answer input. The table-hover correction is covered by anonymous control glyphs
 from the actual stopped cycle. Detailed results and remaining live checks are
-recorded in [the validation notes](docs/qwen-validation.md).
+recorded in [the validation notes](docs/qwen-validation.md). The latest run also
+covers PNG/JPEG preview conversion, API MIME detection, JPEG scroll references,
+and recovery from unsent attachment drafts. Replaying the actual large Gemini
+scroll image completed successfully after its preview was converted to JPEG.
 
 ## Running Seth
 

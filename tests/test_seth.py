@@ -586,18 +586,50 @@ class LocalAPI:
 
 
 class HTTPTests(unittest.TestCase):
+    def test_api_mime_follows_png_or_jpeg_bytes_even_when_the_extension_differs(self):
+        event = lambda obj: 'data: ' + json.dumps(obj) + '\n\n'
+        stream = (event({'choices':[{'delta':{'content':json.dumps(DECISION)}}]})
+                  + event({'choices':[{'delta':{},'finish_reason':'stop'}]}) + 'data: [DONE]\n\n')
+        for streaming in (False, True):
+            for image_format, suffix, mime in (('PNG','.png','image/png'), ('JPEG','.jpg','image/jpeg'),
+                                                ('JPEG','.jpeg','image/jpeg'), ('JPEG','.png','image/jpeg'),
+                                                ('PNG','.jpg','image/png')):
+                with self.subTest(streaming=streaming,image_format=image_format,suffix=suffix), \
+                        tempfile.TemporaryDirectory() as root, LocalAPI(stream_events=stream if streaming else None) as api:
+                    path=Path(root)/('question'+suffix)
+                    Image.new('RGB',(320,200),'white').save(path,format=image_format)
+                    original=path.read_bytes()
+                    config=configuration(root);config['api'].update(base_url=api.url,stream=streaming)
+                    client=SethAIClient(config)
+                    self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path),320,200),DECISION)
+                    self.assertEqual(len(api.requests),1)
+                    url=api.requests[0][2]['messages'][0]['content'][1]['image_url']['url']
+                    self.assertTrue(url.startswith('data:'+mime+';base64,'))
+                    self.assertEqual(base64.b64decode(url.split(',',1)[1]),original)
+                    self.assertEqual(path.read_bytes(),original)
+
+    def test_api_rejects_unsupported_image_bytes_before_posting(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'looks-like-png.png'
+            for image_format in ('GIF','BMP'):
+                Image.new('RGB',(320,200),'white').save(path,format=image_format)
+                with self.subTest(image_format=image_format),patch('ai_client.requests.post') as post, \
+                        self.assertRaises(AIError):
+                    SethAIClient(configuration(root)).analyze_screenshot(path)
+                post.assert_not_called()
+
     def test_scroll_context_uploads_one_combined_png_and_maps_ids_to_the_live_frame(self):
         answer = {'action': 'click', 'target_id': '01', 'confidence': .95, 'explanation': 'B'}
         event = lambda obj: 'data: ' + json.dumps(obj) + '\n\n'
         stream = (event({'choices': [{'delta': {'content': json.dumps(answer)}}]})
                   + event({'choices': [{'delta': {}, 'finish_reason': 'stop'}]}) + 'data: [DONE]\n\n')
-        for streaming in (False, True):
-            with self.subTest(streaming=streaming), tempfile.TemporaryDirectory() as root, \
+        for streaming,image_format in ((False,'PNG'),(True,'PNG'),(False,'JPEG'),(True,'JPEG')):
+            with self.subTest(streaming=streaming,image_format=image_format), tempfile.TemporaryDirectory() as root, \
                     LocalAPI(decision=answer, stream_events=stream if streaming else None) as api:
-                path = Path(root) / 'question.png'
+                path = Path(root) / ('question.png' if image_format=='PNG' else 'question.jpg')
                 image = Image.new('RGB', (320, 200), 'white')
                 ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
-                image.save(path)
+                image.save(path,format=image_format,quality=100,subsampling=0)
                 original = path.read_bytes()
                 config = configuration(root)
                 config['api'].update(base_url=api.url, stream=streaming)
@@ -612,6 +644,7 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(len(api.requests), 1)
                 content = api.requests[0][2]['messages'][0]['content']
                 self.assertIn('LIVE ANSWER VIEW', content[0]['text'])
+                self.assertTrue(content[1]['image_url']['url'].startswith('data:image/png;base64,'))
                 png = base64.b64decode(content[1]['image_url']['url'].split(',', 1)[1])
                 with Image.open(io.BytesIO(png)) as sent:
                     self.assertEqual(sent.width, 320)
