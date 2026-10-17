@@ -313,6 +313,30 @@ paths passed against its real-Chromium local fixture; a converted JPEG preview
 was observed on live Gemini. Both signed-in provider sessions passed a final
 model check.
 
+## Long graph question capture limit
+
+The graph-based MCMA question at question 11 stopped identically with Gemini,
+Qwen, and API before scrolling or inference. Its scrollbar thumb was 58 pixels
+high inside a 351-pixel track. Preserving the existing overlap required nine
+views; the configured maximum was eight. These failures were in the shared
+collector, not provider requests.
+
+The configured and default cap is now twelve views. A larger question produces
+the `scroll_limit` result with `required_views` and `max_views`, and Full status
+shows **Scroll limit**. The image-height and pixel-count bounds remain in place.
+Packing eight reference rectangles at the failed question's actual geometry
+plus its live frame yields 1920 × 2856 pixels (5,483,520 pixels), within both
+bounds. This was a geometry-only check, not a reconstruction of missing views.
+Selections across different answer viewports remain manual at the user's request;
+only the final live view has clickable badge IDs.
+
+All 49 targeted scroll, runtime-selection, and control-target tests passed in
+9.077 seconds. A generated short-thumb viewport reproduced the nine-view case,
+failed before input at eight, then collected all nine at twelve. Runtime checks
+confirmed that a limit failure invokes neither inference nor answer clicks for
+API, Gemini, or Qwen. The VM had advanced to question 12 before the fix, so the
+original nine-view question has not been replayed live.
+
 ## Local regression coverage
 
 `tests/test_qwen_web.py` drives a real Chromium against a local HTTP fixture.

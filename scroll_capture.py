@@ -10,6 +10,13 @@ from control_targets import _components
 from vbox_backend import VMError
 
 
+class ScrollLimitError(VMError):
+    def __init__(self, required_views, max_views):
+        super().__init__(f'Question requires {required_views} scroll views, exceeding the configured limit of '
+                         f'{max_views}; no scrolling or inference attempted.')
+        self.required_views, self.max_views = required_views, max_views
+
+
 @dataclass(frozen=True)
 class Scrollbar:
     thumb: tuple
@@ -159,7 +166,7 @@ class ScrollCollector:
         if not 1 <= len(regions) <= 4:
             raise VMError('Scroll capture needs one to four configured question columns.')
         identity = pixel_box(self.options.get('identity_box', [.05, .15, .35, .28]), size)
-        limit = self.options.get('max_views', 8)
+        limit = self.options.get('max_views', 12)
         if type(limit) is not int or not 2 <= limit <= 12:
             raise VMError('Scroll capture max_views must be between 2 and 12.')
         with Image.open(initial.path) as image:
@@ -171,8 +178,9 @@ class ScrollCollector:
             # At least 35% overlap, even with native thumb/arrow padding.
             intervals = max(1, math.ceil((bar.bottom - bar.top - bar.height) / (.65 * bar.height)))
             plans.append((region, bar, intervals))
-        if sum(intervals + 1 for _, _, intervals in plans) > limit:
-            raise VMError('Question requires more scroll views than the configured limit; no scrolling attempted.')
+        required_views = sum(intervals + 1 for _, _, intervals in plans)
+        if required_views > limit:
+            raise ScrollLimitError(required_views, limit)
         if not plans:
             return ScrolledQuestion(initial, [], regions, identity)
         current, contexts = initial, []

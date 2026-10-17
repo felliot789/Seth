@@ -11,12 +11,12 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw
 
 from capture import Frame
-from scroll_capture import ScrollCollector, find_scrollbar, pixel_box
+from scroll_capture import ScrollCollector, ScrollLimitError, find_scrollbar, pixel_box
 from tests.fake_vbox import FakeManager, TEST_DISPLAY
 from vbox_backend import GuestDisplay, VMError, sdk_operation
 
 
-def screen(position=1, *, scrollbar=True, arrows=True, header='Question 1', shade=139, x=666):
+def screen(position=1, *, scrollbar=True, arrows=True, header='Question 1', shade=139, x=666, thumb_height=100):
     image = Image.new('RGB', (720, 540), 'white')
     draw = ImageDraw.Draw(image)
     draw.text((45, 95), header, fill='black')
@@ -24,8 +24,8 @@ def screen(position=1, *, scrollbar=True, arrows=True, header='Question 1', shad
     draw.ellipse((610, 290, 631, 311), outline='#aaa', width=2)
     if scrollbar:
         color = (shade,) * 3
-        y = round(183 + position * 153)
-        draw.rounded_rectangle((x, y, x + 12, y + 99), radius=5, fill=color)
+        y = round(183 + position * (253 - thumb_height))
+        draw.rounded_rectangle((x, y, x + 12, y + thumb_height - 1), radius=5, fill=color)
         if arrows:
             draw.polygon(((x + 6, 165), (x, 175), (x + 12, 175)), fill=color)
             draw.polygon(((x, 445), (x + 12, 445), (x + 6, 455)), fill=color)
@@ -42,11 +42,12 @@ class Viewport:
         self.parks = []
         self.header, self.no_scroll, self.stuck, self.unstable = 'Question 1', False, False, False
         self.selected = False
+        self.thumb_height = 100
 
     def capture_frame(self):
         self.counter += 1
         path = self.root / f'frame-{self.counter}.png'
-        image = screen(self.position, scrollbar=not self.no_scroll, header=self.header)
+        image = screen(self.position, scrollbar=not self.no_scroll, header=self.header, thumb_height=self.thumb_height)
         if self.selected:
             ImageDraw.Draw(image).ellipse((617, 297, 624, 304), fill='#0877c9')
         if self.unstable:
@@ -120,9 +121,23 @@ class ScrollCaptureTests(unittest.TestCase):
 
     def test_view_limit_is_checked_before_any_scroll(self):
         self.config['capture']['scroll_context']['max_views'] = 2
-        with self.assertRaisesRegex(VMError, 'more scroll views'):
+        with self.assertRaisesRegex(ScrollLimitError, 'requires 4 scroll views.*limit of 2') as failure:
             self.collector.collect(self.viewport.capture_frame())
+        self.assertEqual((failure.exception.required_views, failure.exception.max_views), (4, 2))
         self.assertEqual(self.viewport.drags, [])
+
+    def test_long_graph_question_can_collect_nine_views_with_the_expanded_limit(self):
+        self.viewport.thumb_height = 48
+        initial = self.viewport.capture_frame()
+        with self.assertRaisesRegex(ScrollLimitError, 'requires 9 scroll views.*limit of 8'):
+            self.collector.collect(initial)
+        self.assertEqual(self.viewport.drags, [])
+        self.config['capture']['scroll_context']['max_views'] = 12
+        question = self.collector.collect(initial)
+        self.assertEqual(len(self.viewport.drags), 9)
+        self.assertEqual(len(question.contexts), 8)
+        self.assertEqual(self.viewport.position, 1)
+        question.verify_identity(self.viewport, self.stop)
 
     def test_header_change_during_collection_stops_before_the_next_drag(self):
         self.viewport.after_drag = lambda: setattr(self.viewport, 'header', 'Question 2')

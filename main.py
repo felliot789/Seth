@@ -16,6 +16,7 @@ from capture import SethCapture
 from clicker import SethClicker
 from hotkey import SethHotkey
 from settings import load_config
+from scroll_capture import ScrollLimitError
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
 
@@ -199,6 +200,8 @@ class SethEngine:
                 result["error_code"] = error.code
                 if error.code == "cancelled":
                     result["status"] = "cancelled"
+            elif isinstance(error, ScrollLimitError):
+                result.update(error_code="scroll_limit", required_views=error.required_views, max_views=error.max_views)
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
             result = {"status": "error", "error": "Unexpected cycle failure; no further action will be attempted."}
@@ -210,6 +213,8 @@ class SethEngine:
                 label = "API timeout"
             if result.get("error_code") == "gateway_unavailable":
                 label = "API offline"
+            if result.get("error_code") == "scroll_limit":
+                label = "Scroll limit"
             if result.get("error_code", "").startswith("browser_"):
                 label = {"browser_timeout": "Web timeout", "browser_login": "Web sign-in",
                          "browser_limit": "Web limit", "browser_busy": "Browser busy",

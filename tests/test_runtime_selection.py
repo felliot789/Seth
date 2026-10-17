@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from ai_client import SethAIClient
 from capture import Frame
 from main import SethEngine
+from scroll_capture import ScrollLimitError
 from tests.fake_vbox import TEST_DISPLAY
 from vbox_backend import GuestDisplay, VMError
 from web_inference import WebInferenceClient
@@ -119,6 +120,25 @@ class RuntimeSelectionTests(unittest.TestCase):
                 self.engine.wait()
         self.assertTrue(self.engine.cycle_provider())
         self.assertTrue(self.engine.toggle_capture())
+
+    def test_scroll_limit_is_identified_before_inference_or_answer_input_for_every_provider(self):
+        for provider in ('api', 'gemini', 'qwen'):
+            with self.subTest(provider=provider):
+                engine = SethEngine(self.config, execute=True, manual_selection=True, initial_provider=provider)
+                engine.toggle_capture()
+                with patch.object(engine.ai, 'validate_config'), \
+                        patch.object(engine.capture, 'capture_frame', return_value=self.frame), \
+                        patch.object(engine.ai, 'analyze_screenshot') as analyze, \
+                        patch.object(engine.clicker, 'click') as click, \
+                        patch('scroll_capture.ScrollCollector') as collector:
+                    collector.return_value.collect.side_effect = ScrollLimitError(13, 12)
+                    result = engine.run_cycle()
+                self.assertEqual(result['error_code'], 'scroll_limit')
+                self.assertEqual((result['required_views'], result['max_views']), (13, 12))
+                self.assertEqual(result['inference_provider'], provider)
+                self.assertEqual(engine.progress, ('error', 'Scroll limit'))
+                analyze.assert_not_called()
+                click.assert_not_called()
 
     def test_result_logging_is_inside_the_same_lock_as_inference(self):
         observed = []

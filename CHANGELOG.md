@@ -1,5 +1,18 @@
 # Development milestones
 
+## 2026-10-17 — Expand long-question capture
+
+- Diagnosed the shared API/Gemini/Qwen errors on the graph-based MCMA question:
+  its native scrollbar required nine overlapping views, exceeding the eight-view
+  capture limit before any scrolling or inference request.
+- Raised the configured and default limit to twelve views, retaining overlap,
+  endpoint checks, and the existing image-size bounds. Excess views now report
+  **Scroll limit** with required/allowed counts in the cycle result.
+- Kept selections across different answer viewports manual, as requested. Earlier
+  graph options remain reference context; only final-view controls are clickable.
+- All 49 targeted scroll, runtime-selection, and control-target tests passed,
+  including nine-view collection and rejection before inference for each provider.
+
 ## 2026-10-17 — PNG/JPEG uploads and draft recovery
 
 - Fixed Gemini/Scroll waiting at upload after Gemini converted a large PNG to a

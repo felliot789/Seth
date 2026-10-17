@@ -478,7 +478,11 @@ overlapping sections from native inner-panel scrollbars before inference.
 Each column finishes at its bottom. Earlier sections become reference crops
 above the current answer screenshot in one private PNG upload. Only the live
 answer view receives numbered controls, and its original VM pixel coordinates
-remain authoritative. The current configuration bounds collection to eight views.
+remain authoritative. The current configuration bounds collection to twelve
+views total across the columns, preserving at least 35% overlap. A question that
+needs more stops before scrolling or inference, with **Scroll limit** in Full
+status and the required/allowed counts in the log. The combined image also keeps
+its 8192-pixel height and 16-megapixel limits.
 
 For this configured quiz layout, keep the question header visible and the outer
 page position fixed. Scroll mode operates the question's inner columns; moving
@@ -496,8 +500,10 @@ each selection, allowing changes around earlier confirmed controls. A changed
 view, uncertain scrollbar, failed endpoint, or excess capture count stops input.
 All required new answer controls must fit in the final live view. The model is asked
 to abstain if additional required answer rows remain outside that view; selection
-across several answer viewports is not implemented. The current three-row
-table fits in the final view even though its question does not.
+across several answer viewports stays manual, including graph-based MCMA options
+spread across different scroll positions. The reference crops provide reading
+context, not additional clickable controls. The current three-row table fits in
+the final view even though its question does not.
 
 A table or multiple-answer plan must identify its type and provide unique row
 numbers or option labels. Every point is validated before the first click, and
