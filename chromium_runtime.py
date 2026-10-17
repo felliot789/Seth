@@ -9,6 +9,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.request
 from urllib.parse import urlsplit
@@ -179,6 +180,52 @@ class Chromium(Lightpanda):
             "functionDeclaration": "function(){this.value='';return true}", "returnByValue": True})
         self.call("DOM.setFileInputFiles", {
             "backendNodeId": node, "files": [str(Path(image_path).resolve())]})
+
+    def download_text(self, trigger, *, max_bytes=65536):
+        """Read one UI-initiated text download privately, including virtualized code."""
+        import websocket
+        with tempfile.TemporaryDirectory(prefix="seth-answer-") as directory:
+            try:
+                session, self.session = self.session, None
+                try:
+                    self.call("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": directory})
+                finally:
+                    self.session = session
+                trigger()  # Exactly once; an uncertain click is never retried.
+                ready_until = time.monotonic() + 5
+
+                def downloaded():
+                    files = [path for path in Path(directory).iterdir()
+                             if path.is_file() and not path.name.endswith(".crdownload")]
+                    if len(files) > 1:
+                        raise AIError("The answer produced multiple downloads; refusing to choose one.", "browser_layout")
+                    if files:
+                        path = files[0]
+                        if path.is_symlink() or path.stat().st_size > max_bytes:
+                            raise AIError("The answer download exceeded its size limit or was not a regular file.", "browser_error")
+                        path.chmod(0o600)
+                        try:
+                            text = path.read_text(encoding="utf-8-sig")
+                        except UnicodeError:
+                            raise AIError("The answer download was not UTF-8 text.", "browser_error") from None
+                        if not text.strip():
+                            raise AIError("The answer download was empty.", "browser_error")
+                        return text
+                    if time.monotonic() >= ready_until:
+                        raise AIError("The complete code answer could not be downloaded.", "browser_layout")
+
+                return self.wait(downloaded)
+            finally:
+                # Do not leave this persistent browser downloading into a deleted
+                # directory, even after cancellation or an expired deadline.
+                if self.ws is not None:
+                    try:
+                        self.counter += 1
+                        self.ws.settimeout(0.2)
+                        self.ws.send(json.dumps({"id": self.counter, "method": "Browser.setDownloadBehavior",
+                                                 "params": {"behavior": "default"}}))
+                    except (OSError, websocket.WebSocketException):
+                        pass
 
     def close(self):
         if self.keep_open and self.ws is not None:

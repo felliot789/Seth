@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import uuid
 
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
-from inference import AIError, DecisionClient, build_prompt, screenshot_size
+from control_targets import annotated_controls, ground_decision
+from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_size
 from lightpanda_runtime import DEFAULT_BINARY, Lightpanda, install_lightpanda, write_private_json
 from settings import load_config
 
@@ -340,21 +341,77 @@ class QwenSiteAdapter(SiteAdapter):
         page.wait(mounted)
         return super().prepare(page)
 
+    def _click_upload_control(self, page, selector, matching_text=None):
+        # Qwen can mount/reset the composer before its upload controls. Retry
+        # only the explicit no-click result; JS/protocol/connection failures
+        # remain ambiguous and must propagate without another interaction.
+        ready_until = time.monotonic() + 3
+
+        def ready():
+            try:
+                self.click(page, selector, matching_text)
+            except AIError as error:
+                if error.code == "browser_layout" and time.monotonic() < ready_until:
+                    return False
+                raise
+            return True
+
+        page.wait(ready)
+
     def attach(self, page, image_path):
         # The hidden input is always present, but Qwen arms its one-shot upload
         # handler only when Upload attachment is selected, on every upload.
-        self.click(page, self.selectors["upload"])
         upload_text = self.options.get("upload_text", "Upload attachment")
-        page.wait(lambda: dom(page,
-            "return all(args[0]).filter(e=>text(e).toLowerCase()===args[1].toLowerCase()).length===1;",
-            self.selectors["upload_item"], upload_text))
         with page.intercept_file_chooser() if isinstance(page, Chromium) else nullcontext():
-            self.click(page, self.selectors["upload_item"], upload_text)
+            self._click_upload_control(page, self.selectors["upload"])
+            opened_at = time.monotonic()
+            ready_until = opened_at + 3
+
+            def choose_upload():
+                nonlocal opened_at
+                try:
+                    self.click(page, self.selectors["upload_item"], upload_text)
+                    return True
+                except AIError as error:
+                    # A missing target dispatched no click. New-chat focus or
+                    # rendering can dismiss the menu; reopen only a closed menu.
+                    if error.code != "browser_layout" or time.monotonic() >= ready_until:
+                        raise
+                    if time.monotonic() - opened_at >= .3 and dom(page, "return all('[role=menuitem]').length===0;"):
+                        self._click_upload_control(page, self.selectors["upload"])
+                        opened_at = time.monotonic()
+                    return False
+
+            page.wait(choose_upload)
             if isinstance(page, Chromium):
                 page.set_chooser_file(image_path)
                 self.wait_attachment(page, image_path)
             else:
                 super().attach(page, image_path)
+
+    def exchange(self, page, image_path, prompt, report):
+        raw = super().exchange(page, image_path, prompt, report)
+        virtualized = dom(page, """
+const answers=all(args[0]);if(answers.length!==1)return false;
+const answer=answers[0];if(!answer.querySelector('.qwen-markdown-code-editor-viewport'))return false;
+const blocks=answer.querySelectorAll('pre.qwen-markdown-code');
+const outside=answer.cloneNode(true);outside.querySelectorAll('pre').forEach(e=>e.remove());
+return blocks.length===1&&!text(outside)?'download':'ambiguous';
+""", self.selectors["answer"])
+        if not virtualized:
+            return raw
+        if virtualized != "download" or not isinstance(page, Chromium):
+            raise AIError("qwen: the complete code answer is unavailable or ambiguous.", "browser_layout")
+        before = self.snapshot(page)
+        selector = self.selectors["answer"] + ' pre.qwen-markdown-code .qwen-markdown-code-header button[aria-label="Download"]'
+        raw = page.download_text(lambda: self.click(page, selector))
+        after = self.snapshot(page)
+        self.check_state(after)
+        self.verify_model(after)
+        if (before["users"] != after["users"] or after["responses"] != 1
+                or not after["complete"] or not after["stopped"]):
+            raise AIError("qwen: conversation changed while reading the complete answer.", "browser_layout")
+        return raw
 
 
 class WebInferenceClient(DecisionClient):
@@ -530,9 +587,15 @@ class WebInferenceClient(DecisionClient):
             self._report(f"Opening {provider}")
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
-                raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
-                    page, image_path, prompt or adapter.build_prompt(width, height), self._report))
-                self.parse_coordinates(raw, width, height)
+                labeled = provider == "qwen" and not prompt
+                with annotated_controls(image_path) if labeled else nullcontext((image_path, None)) as (upload, controls):
+                    request_prompt = prompt or (build_control_prompt(width, height, controls) if labeled
+                                                else self.adapter(provider).build_prompt(width, height))
+                    raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
+                        page, upload, request_prompt, self._report))
+                    decision = self.parse_coordinates(raw, width, height, control_targets=controls)
+                if provider == "qwen" and decision is not None:
+                    raw = json.dumps(decision if labeled else ground_decision(image_path, decision))
                 self.last_provider = provider
                 LOG.info("Web inference completed using %s", provider)
                 return raw
@@ -541,7 +604,7 @@ class WebInferenceClient(DecisionClient):
                     raise
                 self.last_attempts.append({"provider": provider, "error_code": error.code})
                 attempted_errors.append(error.code)
-                LOG.info("%s attempt stopped (%s)", provider, error.code)
+                LOG.info("%s attempt stopped (%s): %s", provider, error.code, error)
         if time.monotonic() >= deadline:
             raise AIError("Web inference exhausted its total time budget.", "browser_timeout")
         codes = set(attempted_errors) or {attempt["error_code"] for attempt in self.last_attempts}

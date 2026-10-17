@@ -212,9 +212,10 @@ Lightpanda's support for file inputs does not prove compatibility with every
 site's upload preprocessing or JavaScript. Tests with both real engines verify a local
 PNG upload byte for byte, cookie restoration across browser restarts, complete
 answer extraction, cancellation, and failure handling. Gemini screenshot inference
-has also passed live checks using the persistent Chromium session. Qwen is not
-an operational fallback, and ChatGPT web integration has been withdrawn; see
-[the validation record](docs/lightpanda-validation.md).
+has passed live checks using the persistent Chromium session. Qwen has also
+completed a VM answer cycle with the selected control confirmed in a fresh capture;
+see [Qwen validation](docs/qwen-validation.md) for scope and limitations.
+ChatGPT web integration has been withdrawn.
 
 Run the offline integration suites with installed browser engines:
 
@@ -369,7 +370,8 @@ cancels clicking that has not been dispatched. After an unclean shutdown, the
 next listener automatically recovers its abandoned socket. It refuses to replace
 a socket with a live listener or any unrelated file.
 
-The model returns a point on a 0..1000 grid over the entire screenshot, explicitly
+For the Gemini and API default prompts, the model returns a point on a 0..1000
+grid over the entire screenshot, explicitly
 declaring `coordinate_space: "normalized_1000"`. Seth converts it to actual guest
 pixels locally. Explicit `"pixels"` decisions are also accepted; a missing or
 unknown coordinate space is rejected. Model IDs are passed through unchanged.
@@ -382,6 +384,18 @@ movement and focus do not affect this check. The supplied `capture.max_age_secon
 is 300, allowing for the 240-second inference response budget;
 `clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
 pixel without jitter or simulated host cursor movement.
+
+Qwen receives a temporary copy of the screenshot with numbered badges over
+supported unchecked controls. It returns badge IDs; Seth calculates click pixels
+from the original control outlines. The original VM capture stays unchanged.
+Unknown IDs, wrong control types, and duplicate controls reject the whole plan
+before input. The current local detector supports radios 16–34 pixels across
+and checkboxes 12–34 pixels across on a sufficiently uniform background.
+After each Qwen click, a fresh capture must show the control's interior selected;
+otherwise the cycle stops without retrying the click. Confirmed clicks include
+`selection_verified: true` in the result. This verifies selection, not correctness.
+Explicit custom Qwen coordinate prompts instead use a conservative local check
+within 24 pixels of each predicted point; missing or ambiguous controls stop input.
 
 A table or multiple-answer plan must identify its type and provide unique row
 numbers or option labels. Every point is validated before the first click, and
@@ -398,8 +412,8 @@ threads. Each helper holds a shared VM session and releases it on completion.
 Input consists of a move, one left press held for 80 ms, and a release. The hold
 lets the guest's virtual input device observe the pressed state. Release is
 attempted even when pressing reports an error. Input errors are not retried,
-because completion may be uncertain. `clicked` confirms SDK event delivery,
-not answer correctness or application acceptance. Screen content can change during
+because completion may be uncertain. Outside the Qwen path, `clicked` confirms
+SDK event delivery, not application acceptance. Screen content can change during
 inference even if display geometry stays constant. Start with a dry run.
 The prompt excludes login, navigation, next, and submit controls and allows
 `action: "none"`; model behavior is not guaranteed.

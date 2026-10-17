@@ -2,6 +2,7 @@
 
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -14,10 +15,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
 from inference import AIError
+from lightpanda_runtime import write_private_json
 from web_inference import WebInferenceClient
 
 
@@ -36,8 +38,12 @@ const editor=document.querySelector('textarea'),input=document.querySelector('#f
 const send=document.querySelector('.send-button'),files=document.querySelector('.message-input-column-file');
 const nativeValue=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value');
 let tracked='',draft='',armed=false,uploadReady=false;
-window.events=[];window.submissions=0;window.menuSelections=0;window.newChats=0;
-window.unarmedChanges=0;window.completed=false;window.submittedPrompts=[];
+window.events=[];window.submissions=0;window.menuSelections=0;window.menuOpens=0;window.newChats=0;
+window.unarmedChanges=0;window.completed=false;window.submittedPrompts=[];window.downloads=0;
+if(scenario==='late_upload_control'){
+ const upload=document.querySelector('[aria-label="Select Mode"]');upload.style.display='none';
+ setTimeout(()=>upload.style.display='',800);
+}
 if(scenario==='hydrating'||scenario==='signed_out'){
  const login=document.createElement('button');login.textContent='Log in';document.body.append(login);
  if(scenario==='hydrating')setTimeout(()=>login.remove(),1100);
@@ -61,6 +67,7 @@ document.querySelector('[aria-label="New Chat"]').onclick=()=>{
  // and a previously initialized input still needs another menu selection.
 };
 document.querySelector('[aria-label="Select Mode"]').onclick=()=>{
+ window.menuOpens++;
  const menu=document.createElement('div');menu.id='upload-menu';
  menu.innerHTML='<div role="menuitem"><span class="mode-select-dropdown-item-name">Upload attachment</span><span>file, image, video, audio</span></div>';
  menu.querySelector('[role="menuitem"]').onclick=()=>{
@@ -79,6 +86,10 @@ document.querySelector('[aria-label="Select Mode"]').onclick=()=>{
    }else activate();
  };
  document.body.append(menu);
+ if(scenario==='closing_menu'&&window.menuOpens===1){
+   menu.querySelector('[role="menuitem"]').style.display='none';
+   setTimeout(()=>menu.remove(),30);
+ }
 };
 async function uploadFile(event){
  if(!armed){window.unarmedChanges++;return;}
@@ -110,8 +121,23 @@ send.onclick=()=>{
  setTimeout(()=>{
    const final=document.createElement('div');final.className='response-message-content phase-answer';
    final.innerHTML='<div class="qwen-markdown"><pre><code></code></pre></div>';
-   final.querySelector('code').textContent=JSON.stringify({action:'click',coordinate_space:'normalized_1000',
-     click_x:500,click_y:500,confidence:0.99,explanation:'Final answer'});
+   const decision=scenario==='control_ids'
+     ?{action:'click',target_id:'01',confidence:0.99,explanation:'Final answer'}
+     :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Final answer'};
+   final.querySelector('code').textContent=JSON.stringify(decision);
+   if(scenario==='rendered_code'){
+     const answer={action:'select',selection_type:'multiple_answer',selections:[
+       {option:'A',target_id:'01'},{option:'C',target_id:'03'}],confidence:0.99,
+       explanation:'Complete answer: café ✓ '+ 'proof '.repeat(100)};
+     final.querySelector('.qwen-markdown').innerHTML='<pre class="qwen-markdown-code"><div class="qwen-markdown-code-header"><span>json</span><button aria-label="Download">Download</button></div><div class="qwen-markdown-code-editor-viewport">12345678910111213141516 {"action": "select", "selections": [</div></pre>';
+     final.querySelector('[aria-label="Download"]').onclick=()=>{
+       if(!window.completed)throw new Error('Download before completed final answer');
+       window.downloads++;window.events.push('download');
+       const link=document.createElement('a');link.download='answer.json';
+       link.href=URL.createObjectURL(new Blob([JSON.stringify(answer,null,2)],{type:'application/json'}));
+       setTimeout(()=>{link.click();URL.revokeObjectURL(link.href);},50);
+     };
+   }
    assistant.append(final);
    if(scenario==='interrupted'){stop.remove();return;}
    // Keep valid final JSON visible for longer than the stability window while
@@ -171,6 +197,83 @@ class ChromiumUploadCleanupTests(unittest.TestCase):
                 self.assertIs(caught.exception, original)
                 self.assert_cleanup_command(page)
 
+    def test_answer_download_is_private_bounded_and_cleaned_up(self):
+        for content, expected_code in (('{"action":"none"}', None), ("", "browser_error"),
+                                       ("x" * 33, "browser_error"), (b"\xff", "browser_error")):
+            with self.subTest(content=content):
+                page = self.page()
+                directories = []
+
+                def trigger():
+                    directory = Path(call.call_args.args[1]["downloadPath"])
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    directories.append(directory)
+                    if isinstance(content, bytes):
+                        (directory / "answer.json").write_bytes(content)
+                    else:
+                        (directory / "answer.json").write_text(content)
+
+                with patch.object(page, "call", return_value={}) as call:
+                    if expected_code:
+                        with self.assertRaises(AIError) as caught:
+                            page.download_text(trigger, max_bytes=32)
+                        self.assertEqual(caught.exception.code, expected_code)
+                    else:
+                        self.assertEqual(page.download_text(trigger, max_bytes=32), content)
+                self.assertFalse(directories[0].exists())
+                self.assertEqual(page.session, "fixture-session")
+                self.assertEqual(json.loads(page.ws.send.call_args.args[0]), {
+                    "id": 18, "method": "Browser.setDownloadBehavior", "params": {"behavior": "default"}})
+
+    def test_answer_download_cleanup_preserves_cancellation_and_original_failure(self):
+        page = self.page()
+        original = AIError("Original cancelled operation", "cancelled")
+
+        def cancelled():
+            page.deadline = time.monotonic() - 1
+            page.stop_event.set()
+            raise original
+
+        with patch.object(page, "call", return_value={}) as call, self.assertRaises(AIError) as caught:
+            page.download_text(cancelled)
+        self.assertIs(caught.exception, original)
+        self.assertFalse(Path(call.call_args.args[1]["downloadPath"]).exists())
+        self.assertEqual(json.loads(page.ws.send.call_args.args[0]), {
+            "id": 18, "method": "Browser.setDownloadBehavior", "params": {"behavior": "default"}})
+
+
+class QwenUploadReadinessTests(unittest.TestCase):
+    def test_only_an_explicit_no_click_result_is_polled_again(self):
+        adapter = WebInferenceClient({}).adapter("qwen")
+        page = MagicMock()
+
+        def wait(poll):
+            while not poll():
+                pass
+
+        page.wait.side_effect = wait
+        with patch.object(adapter, "click", side_effect=[AIError("Not mounted", "browser_layout"), None]) as click:
+            adapter._click_upload_control(page, "fixture-selector")
+        self.assertEqual(click.call_count, 2)
+        for code in ("browser_javascript", "browser_protocol", "browser_error", "cancelled"):
+            with self.subTest(code=code), patch.object(adapter, "click", side_effect=AIError("Ambiguous failure", code)) as click:
+                with self.assertRaises(AIError) as caught:
+                    adapter._click_upload_control(page, "fixture-selector")
+                self.assertEqual(caught.exception.code, code)
+                click.assert_called_once()
+
+    def test_uncertain_upload_item_click_never_reopens_or_repeats_it(self):
+        adapter = WebInferenceClient({}).adapter("qwen")
+        page = MagicMock()
+        page.wait.side_effect = lambda poll: poll()
+        for code in ("browser_javascript", "browser_protocol", "browser_error", "cancelled"):
+            with self.subTest(code=code), patch.object(adapter, "click", side_effect=[None, AIError("Uncertain item click", code)]) as click:
+                with self.assertRaises(AIError) as caught:
+                    adapter.attach(page, Path("unused.png"))
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(click.call_count, 2)
+                page.set_file.assert_not_called()
+
 
 @unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1",
                      "Set SETH_CHROMIUM_TESTS=1 for offline Qwen Chromium integration")
@@ -187,7 +290,7 @@ class QwenChromiumIntegrationTests(unittest.TestCase):
                 scenario = self.path.strip("/") or "normal"
                 html = QWEN_FIXTURE.replace("SCENARIO", json.dumps(scenario)).encode()
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(html)
 
@@ -231,6 +334,63 @@ class QwenChromiumIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.uploads), before + 1)
         self.assertEqual(hashlib.sha256(self.uploads[-1]).digest(),
                          hashlib.sha256(self.image.read_bytes()).digest())
+
+    def test_upload_control_can_mount_after_the_chat_editor(self):
+        before = len(self.uploads)
+        adapter = self.adapter("late_upload_control")
+        with self.browser() as page:
+            raw = adapter.exchange(page, self.image, "Select the answer.", lambda label: None)
+            self.assertEqual(json.loads(raw)["action"], "click")
+            self.assertEqual(page.evaluate("window.submissions"), 1)
+            self.assertEqual(page.evaluate("window.menuSelections"), 1)
+        self.assert_uploaded_image(before)
+
+    def test_menu_closing_before_item_click_is_reopened_without_duplicate_upload(self):
+        before = len(self.uploads)
+        adapter = self.adapter("closing_menu")
+        with self.browser() as page:
+            raw = adapter.exchange(page, self.image, "Select the answer.", lambda label: None)
+            self.assertEqual(json.loads(raw)["action"], "click")
+            self.assertEqual(page.evaluate("window.menuOpens"), 2)
+            self.assertEqual(page.evaluate("window.menuSelections"), 1)
+            self.assertEqual(page.evaluate("window.submissions"), 1)
+        self.assert_uploaded_image(before)
+
+    def test_client_uploads_numbered_controls_and_resolves_the_returned_id(self):
+        image = Image.new("RGB", (320, 200), "white")
+        ImageDraw.Draw(image).ellipse((149, 89, 170, 110), outline="#aaa", width=2)
+        image.save(self.image)
+        original = self.image.read_bytes()
+        before = len(self.uploads)
+        self.client.web.update(providers=["qwen"], state_dir=str(self.root / "state"),
+                               timeout_seconds=12, attempt_timeout_seconds=12)
+        self.client.web["sites"]["qwen"]["engine"] = "chromium"
+        write_private_json(self.client.cookie_file("qwen"), [])
+        adapter = self.adapter("control_ids")
+        with patch.object(self.client, "adapter", return_value=adapter):
+            raw = self.client.analyze_screenshot(self.image)
+        result = self.client.parse_coordinates(raw, 320, 200)
+        self.assertEqual((result["click_x"], result["click_y"]), (160, 100))
+        self.assertEqual(result["target_id"], "01")
+        self.assertEqual(result["target_control"], {"kind": "radio", "box": [149, 89, 171, 111]})
+        self.assertEqual(self.image.read_bytes(), original)
+        self.assertEqual(len(self.uploads), before + 1)
+        self.assertNotEqual(self.uploads[-1], original)
+        with Image.open(io.BytesIO(self.uploads[-1])) as annotated:
+            self.assertEqual(annotated.size, (320, 200))
+            self.assertIn((255, 242, 0), {color for _, color in annotated.convert("RGB").getcolors(maxcolors=65536)})
+
+    def test_virtualized_code_is_read_completely_after_generation_without_clipboard(self):
+        adapter = self.adapter("rendered_code")
+        with self.browser() as page:
+            raw = adapter.exchange(page, self.image, "Select all correct answers.", lambda label: None)
+            result = json.loads(raw)
+            self.assertEqual(result["selection_type"], "multiple_answer")
+            self.assertEqual([p["target_id"] for p in result["selections"]], ["01", "03"])
+            self.assertIn("café ✓", result["explanation"])
+            self.assertGreater(len(result["explanation"]), 600)
+            self.assertEqual(page.evaluate("window.downloads"), 1)
+            self.assertEqual(page.evaluate("window.events.slice(-2)"), ["final", "download"])
 
     def test_menu_armed_upload_and_controlled_textarea_return_only_completed_final(self):
         before = len(self.uploads)

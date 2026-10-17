@@ -85,6 +85,7 @@ class SethEngine:
                 result = {"status": "dry_run", "decision": decision}
             else:
                 self.progress = ("selecting", "Selecting")
+                grounded = getattr(self.ai, "last_provider", None) == "qwen"
                 if decision["action"] == "select":
                     for selection in decision["selections"]:
                         if self.stop_event.is_set():
@@ -92,10 +93,19 @@ class SethEngine:
                         self.capture.verify_target(frame, selection["click_x"], selection["click_y"])
                         click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.stop_event)
                         completed_clicks.append(click | {key: selection[key] for key in ("row", "choice", "option") if key in selection})
+                        if grounded:
+                            self.capture.verify_selection(frame, selection, self.stop_event)
+                            completed_clicks[-1]["selection_verified"] = True
                         self.progress = ("selecting", f"Selected {len(completed_clicks)}/{len(decision['selections'])}")
                     result = {"status": "clicked", "decision": decision, "click_count": len(completed_clicks), "clicks": completed_clicks}
                 else:
+                    if grounded:
+                        self.capture.verify_target(frame, decision["click_x"], decision["click_y"])
                     click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
+                    if grounded:
+                        completed_clicks.append(click)
+                        self.capture.verify_selection(frame, decision, self.stop_event)
+                        click["selection_verified"] = True
                     result = {"status": "clicked", "decision": decision, "click": click}
                 self.cycle_count += 1
         except (AIError, VMError, OSError, ValueError, TypeError) as error:

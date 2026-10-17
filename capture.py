@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import tempfile
+import time
 
 from PIL import Image
 
+from control_targets import selection_visible
 from vbox_backend import GuestDisplay, VMError, VirtualBoxBackend
 
 
@@ -54,3 +56,22 @@ class SethCapture:
         with Image.open(frame.path) as before, Image.open(fresh.path) as after:
             if before.convert("RGB").crop(box).tobytes() != after.convert("RGB").crop(box).tobytes():
                 raise VMError("Remaining answer control changed; no further input. Start a fresh cycle.")
+
+    def verify_selection(self, frame, target, stop_event=None):
+        """Confirm a grounded control became selected; never retry the click."""
+        deadline = time.monotonic() + 1.5
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                raise VMError("Cycle cancelled while confirming selection; no further input.")
+            fresh = self.capture_frame()
+            if fresh.display != frame.display:
+                raise VMError("VM or guest display changed while confirming selection; no further input.")
+            with Image.open(frame.path) as before, Image.open(fresh.path) as after:
+                if selection_visible(before, after, target["target_control"]):
+                    return
+            if time.monotonic() >= deadline:
+                raise VMError("Input was sent, but the answer control did not become visibly selected; no further input.")
+            if stop_event is not None:
+                stop_event.wait(.1)
+            else:
+                time.sleep(.1)

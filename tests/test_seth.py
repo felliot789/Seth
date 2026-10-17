@@ -203,6 +203,38 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.engine.cycle_count, 1)
         self.assertEqual(self.engine.progress, ("done", "Done"))
 
+    def test_qwen_click_is_successful_only_after_visible_selection(self):
+        self.engine.ai.last_provider = "qwen"
+        events = []
+        self.verify.side_effect = lambda *args: events.append("before")
+        self.click.side_effect = lambda *args: events.append("click") or {"click_x": 150, "click_y": 100}
+        with patch.object(self.engine.capture, "verify_selection", side_effect=lambda *args: events.append("after")) as confirm:
+            result = self.engine.run_cycle()
+        self.assertEqual(events, ["before", "click", "after"])
+        self.assertEqual(result["status"], "clicked")
+        self.assertTrue(result["click"]["selection_verified"])
+        confirm.assert_called_once_with(self.frame, DECISION, self.engine.stop_event)
+
+    def test_qwen_missed_click_is_an_error_and_is_never_retried(self):
+        self.engine.ai.last_provider = "qwen"
+        with patch.object(self.engine.capture, "verify_selection", side_effect=VMError("Control stayed unchecked")):
+            result = self.engine.run_cycle()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["clicks_completed"], 1)
+        self.assertEqual(self.engine.cycle_count, 0)
+        self.click.assert_called_once()
+
+    def test_qwen_plan_stops_before_next_target_when_confirmation_fails(self):
+        self.engine.ai.last_provider = "qwen"
+        self.analyze.return_value = json.dumps(CLASSIFICATION)
+        with patch.object(self.engine.capture, "verify_selection", side_effect=[None, VMError("Control stayed unchecked")]):
+            result = self.engine.run_cycle()
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(self.click.call_count, 2)
+        self.assertTrue(result["clicks"][0]["selection_verified"])
+        self.assertNotIn("selection_verified", result["clicks"][1])
+        self.assertEqual(self.engine.cycle_count, 0)
+
     def test_progress_tracks_capture_inference_and_selection(self):
         observed = []
         def capture():

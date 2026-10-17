@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from ai_client import SethAIClient
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
 from gemini_web import GeminiWebClient
@@ -121,6 +121,79 @@ class WebClientTests(unittest.TestCase):
             self.assertEqual(self.client.analyze_screenshot(self.image), '{"action":"none"}')
             self.assertEqual(run.call_count, 2)
         self.assertEqual(self.client.last_provider, "chatgpt")
+
+    def test_explicit_qwen_coordinate_prompt_still_grounds_nearby_controls(self):
+        self.client.web["providers"] = ["qwen"]
+        with Image.open(self.image) as image:
+            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline="#aaa", width=2)
+            image.save(self.image)
+        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
+                          "confidence": .95, "explanation": "Option D."})
+        with patch.object(self.client, "_run", return_value=raw):
+            grounded = self.client.parse_coordinates(self.client.analyze_screenshot(
+                self.image, prompt="Return original pixel coordinates."), 320, 200)
+        self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
+        self.assertEqual(grounded["model_point"], {"space": "pixels", "x": 167, "y": 97})
+        self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
+
+    def test_default_qwen_upload_uses_ids_and_local_pixels_and_cleans_annotated_copy(self):
+        self.client.web["providers"] = ["qwen"]
+        with Image.open(self.image) as image:
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((169, 39, 190, 60), outline="#aaa", width=2)
+            draw.ellipse((169, 89, 190, 110), outline="#aaa", width=2)
+            image.save(self.image)
+        original = self.image.read_bytes()
+        uploads = []
+
+        def run(provider, deadline, operation):
+            adapter = MagicMock()
+
+            def exchange(page, upload, prompt, report):
+                uploads.append(upload)
+                self.assertNotEqual(upload, self.image)
+                self.assertEqual(upload.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(upload.parent.stat().st_mode & 0o777, 0o700)
+                self.assertIn('"02": "radio"', prompt)
+                self.assertIn("Do not estimate or return coordinates", prompt)
+                with Image.open(upload) as image:
+                    self.assertEqual(image.size, (320, 200))
+                return json.dumps({"action": "click", "target_id": "02", "confidence": .95,
+                                   "explanation": "The second option is correct.",
+                                   "coordinate_space": "pixels", "click_x": 90, "click_y": 40})
+
+            adapter.exchange.side_effect = exchange
+            return operation(adapter, None)
+
+        with patch.object(self.client, "_run", side_effect=run):
+            grounded = self.client.parse_coordinates(self.client.analyze_screenshot(self.image), 320, 200)
+        self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
+        self.assertEqual(grounded["target_id"], "02")
+        self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
+        self.assertEqual(self.image.read_bytes(), original)
+        self.assertFalse(uploads[0].exists())
+
+    def test_missing_qwen_control_rejects_the_plan_and_allows_fallback(self):
+        self.client.web["providers"] = ["qwen", "gemini"]
+        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
+                          "confidence": .99, "explanation": "Option D."})
+        with patch.object(self.client, "_run", side_effect=[raw, '{"action":"none"}']):
+            self.assertEqual(self.client.analyze_screenshot(self.image), '{"action":"none"}')
+        self.assertEqual(self.client.last_provider, "gemini")
+        self.assertEqual(self.client.last_attempts, [{"provider": "qwen", "error_code": "browser_grounding"}])
+        self.client.web["providers"] = ["qwen"]
+        with patch.object(self.client, "_run", return_value=raw), self.assertRaises(AIError) as caught:
+            self.client.analyze_screenshot(self.image)
+        self.assertEqual(caught.exception.code, "browser_grounding")
+
+    def test_qwen_abstention_and_other_provider_coordinates_are_preserved(self):
+        for provider, raw in (("qwen", '{"action":"none"}'), ("gemini", json.dumps({
+                "action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
+                "confidence": .95, "explanation": "Option D."}))):
+            with self.subTest(provider=provider):
+                self.client.web["providers"] = [provider]
+                with patch.object(self.client, "_run", return_value=raw):
+                    self.assertEqual(self.client.analyze_screenshot(self.image), raw)
 
     def test_total_deadline_is_shared_between_fallbacks(self):
         self.client.web.update(timeout_seconds=5, attempt_timeout_seconds=10)

@@ -1,5 +1,24 @@
 # Development milestones
 
+## 2026-10-17 — Qwen control IDs and confirmed selection
+
+- Fixed missed VM answers caused by Qwen's inconsistent pixel estimates. Default
+  Qwen requests now upload a private numbered copy of the screenshot and return
+  control IDs; local detection supplies actual click coordinates. Strict plan
+  validation rejects unknown IDs, wrong control types, and duplicate controls.
+- Confirm each Qwen selection in a fresh capture. An unchecked control stops the
+  cycle without retrying input. A live Gemini → Qwen cycle selected the correct
+  radio and confirmed its blue checked state in 29.613 seconds.
+- Wait for late-mounted Qwen upload controls without retrying uncertain events.
+  Read virtualized multiline code through its final-response Download control,
+  with private bounded files and cleanup; line-number/viewport text is not parsed
+  as a complete answer. The host clipboard is not used.
+- Preserve Gemini/API coordinate behavior and explicit custom Qwen coordinate
+  prompts. See `docs/qwen-validation.md` for detector limits and remaining checks.
+- All 150 tests passed with Lightpanda, Chromium, and native-login integrations
+  enabled. Live numbered-control MCMA/table probes returned every correct target;
+  repeating the answered VM question correctly returned no action.
+
 ## 2026-10-16 — Qwen screenshot fallback
 
 - Enabled Qwen3.8-Omni-Flash with Thinking after Gemini in the web fallback order.
