@@ -1,5 +1,29 @@
 # Development milestones
 
+## 2026-10-18 — One command for Seth's application services
+
+- Added `seth up` (also bare `seth`), `down`, component restarts, `status`,
+  `logs`, and `doctor`. `seth install` installs the command and renders user
+  services for the checkout/configuration, replacing listener-only autostart
+  with `seth.target`. Setup stays separate from everyday launch.
+- Kept the listener, shortcuts, and overlay together; a separate browser
+  manager owns the persistent Chromium lifecycle and Gemini/Qwen tab records.
+  Repeated launches and listener restarts preserve browser sessions and drafts.
+  Stale records, closed tabs, and closed windows recover automatically.
+- Inspect login, model, thinking, and verification state without submitting
+  prompts or resetting chats. Report provider readiness independently of service
+  readiness; API connectivity uses an unauthenticated, empty HEAD request.
+  The external API and the Windows VM remain outside service management.
+- Added systemd readiness notifications, serialized lifecycle commands, private
+  status records, graceful browser shutdown, and reaping of exited browser
+  processes. Managed listeners reuse the browser service instead of spawning
+  Chromium inside the listener's lifecycle.
+- The 247-test regression run passed with Lightpanda, Chromium, and native-login
+  integrations enabled. All 15 final launch checks passed, including isolated
+  real-Chromium recovery/adoption and the host's evdev compatibility fix.
+  Live host checks verified repeated launch, browser preservation across listener
+  restart, and full shutdown/startup without inference or VM input.
+
 ## 2026-10-17 — Remove desktop shadow and reduce dot to three pixels
 
 - Disabled the window drop shadow and opted out of Breeze's tooltip shadow

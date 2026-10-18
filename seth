@@ -1,0 +1,5 @@
+#!/bin/sh
+# Resolve the installed symlink so this works from any directory.
+set -eu
+SETH_ROOT=$(dirname -- "$(readlink -f -- "$0")")
+exec "$SETH_ROOT/.venv/bin/python" "$SETH_ROOT/seth_cli.py" "$@"

@@ -21,7 +21,14 @@ _MANAGED_PROCESSES = {}
 
 
 def retain_process(process):
+    reap_processes()
     _MANAGED_PROCESSES[process.pid] = process
+
+
+def reap_processes():
+    for pid, process in list(_MANAGED_PROCESSES.items()):
+        if process.poll() is not None:
+            _MANAGED_PROCESSES.pop(pid, None)
 
 
 def find_chromium(executable=None):
@@ -32,11 +39,13 @@ def find_chromium(executable=None):
 class Chromium(Lightpanda):
     label = "Chromium"
 
-    def __init__(self, *, profile, executable=None, headless=True, state_file=None, keep_open=False, **kwargs):
+    def __init__(self, *, profile, executable=None, headless=True, state_file=None, keep_open=False,
+                 require_existing=False, **kwargs):
         self.profile = Path(profile).expanduser().resolve()
         self.headless = headless
         self.state_file = Path(state_file) if state_file else None
         self.keep_open = keep_open
+        self.require_existing = require_existing
         self.reuse_page = False
         self._file_chooser_node = None
         super().__init__(executable=find_chromium(executable) or "/nonexistent/chromium", **kwargs)
@@ -69,6 +78,9 @@ class Chromium(Lightpanda):
                     self._connect(endpoint, state["target_id"])
                     self.reuse_page = True
                     return self
+            if self.require_existing:
+                raise AIError("The managed browser is unavailable. Run seth up or inspect seth logs browser.",
+                              "browser_start")
             self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                             env=environment, start_new_session=True)
             startup_deadline = min(self.deadline, time.monotonic() + 10)
@@ -115,12 +127,14 @@ class Chromium(Lightpanda):
             self.close()
             raise
 
-    def _connect(self, endpoint, target):
+    def _connect(self, endpoint, target=None):
         import websocket
         address = urlsplit(endpoint)
         if address.scheme != "ws" or address.hostname not in ("127.0.0.1", "localhost"):
             raise AIError("Invalid local browser endpoint.", "browser_start")
         self.ws = websocket.create_connection(endpoint, timeout=0.2, suppress_origin=True, http_proxy_host=None)
+        if target is None:
+            return
         info = self.call("Target.getTargetInfo", {"targetId": target}).get("targetInfo", {})
         if info.get("type") != "page":
             raise AIError("The managed chat tab was closed. Run --login to reopen it.", "browser_login")

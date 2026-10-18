@@ -597,6 +597,8 @@ class WebInferenceClient(DecisionClient):
                                 profile=self.login_profile(provider),
                                 state_file=self.native_state_file(provider),
                                 keep_open=self.adapter(provider).options.get("keep_browser_open", False),
+                                require_existing=os.environ.get("SETH_MANAGED_BROWSER") == "1"
+                                and self.adapter(provider).options.get("keep_browser_open", False),
                                 **(options | {"cookies": None}))
                        if self.engine(provider) == "chromium" else
                        Lightpanda(executable=self.web.get("executable_path"), **options))

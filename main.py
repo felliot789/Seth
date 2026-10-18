@@ -16,6 +16,7 @@ from capture import SethCapture
 from clicker import SethClicker
 from hotkey import SethHotkey
 from settings import load_config
+from service_runtime import notify
 from scroll_capture import ScrolledQuestion, ScrollLimitError, ScrollNavigationError
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
@@ -366,6 +367,7 @@ def main():
                 if overlay is not None:
                     overlay.poll(engine.progress, engine.indicator_selection)
 
+            notify("READY=1\nSTATUS=Listener, shortcuts and indicator ready")
             trigger.serve(engine.stop_event, poll=poll if hotkey is not None else None)
         finally:
             engine.stop_event.set()

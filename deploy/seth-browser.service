@@ -1,0 +1,21 @@
+[Unit]
+Description=Seth shared browser and provider session status
+PartOf=seth.target graphical-session.target
+After=graphical-session-pre.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+WorkingDirectory=@ROOT@
+ExecStart=@PYTHON@ @BROWSER@ --config @CONFIG@
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=seth.target

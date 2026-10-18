@@ -1,16 +1,19 @@
 [Unit]
 Description=Seth keyboard shortcuts and host status indicator
-PartOf=graphical-session.target
+PartOf=seth.target graphical-session.target
 After=graphical-session-pre.target
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
-WorkingDirectory=%h/work1/seth
-ExecStart=%h/work1/seth/.venv/bin/python %h/work1/seth/main.py --mode listen --execute --hotkey --overlay
+Type=notify
+NotifyAccess=main
+WorkingDirectory=@ROOT@
+ExecStart=@PYTHON@ @MAIN@ --config @CONFIG@ --mode listen --execute --hotkey --overlay
+Environment=PYTHONUNBUFFERED=1 SETH_MANAGED_BROWSER=1
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=30
 TimeoutStopSec=270
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=seth.target

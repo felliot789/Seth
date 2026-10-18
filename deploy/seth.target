@@ -1,0 +1,8 @@
+[Unit]
+Description=Seth application services (VM managed separately)
+Wants=seth-listener.service seth-browser.service
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Install]
+WantedBy=graphical-session.target

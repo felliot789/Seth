@@ -12,11 +12,15 @@ On this configured host, Seth starts automatically when you log into KDE. To
 start the whole application manually, run this from any directory:
 
 ```sh
-systemctl --user start seth-listener
+seth up
 ```
 
-That one service starts the listener, keyboard shortcuts, host indicator,
-and answer selection. Start the Windows VM separately and open a question.
+`seth` with no arguments does the same thing. It starts the listener, keyboard
+shortcuts, host indicator, and persistent browser with Gemini and Qwen tabs.
+Repeating it reuses healthy services and browser sessions. Seth never starts,
+stops, or changes the Windows VM; start it separately and open a question.
+On a fresh checkout, install the command once with `./seth install` after the
+Python dependencies and keyboard permissions below are configured.
 
 | Shortcut | Action |
 | --- | --- |
@@ -30,10 +34,10 @@ Hold the modifiers, press both letters together in either order, then release
 all keys. Startup defaults are **API · Single · Full**, with white text. Provider and capture
 changes only apply while idle; busy presses are discarded. Switching sends no
 inference request, and uncertainty does not automatically change providers.
-Check startup with `systemctl --user status seth-listener --no-pager` and
-`journalctl --user -b -u seth-listener -n 20 --no-pager`. Use
-`systemctl --user restart seth-listener` after code or `.env` changes, and
-`systemctl --user stop seth-listener` to stop the whole application.
+Check startup with `seth status` and follow progress with `seth logs`. Use
+`seth restart listener` after listener code or `.env` changes; browser sessions
+remain open. Use `seth down` to stop all Seth services. `seth doctor` checks
+services, device access, and API connectivity without capturing or submitting.
 The examples below show individual modes and foreground alternatives; do not
 start a second listener while the service is running.
 
@@ -167,6 +171,14 @@ The login helper uses an installed Chromium/Chrome browser for manual sign-in.
 It saves the native profile for Chromium and exports only the selected site's
 cookies for Lightpanda:
 
+With the application services running, sign in directly in the existing Gemini
+and Qwen tabs and select their configured models and thinking levels. The browser
+manager detects readiness and saves the site's cookies automatically. Check
+`seth status`; login, verification, and model problems are reported separately.
+Startup and status checks preserve conversations and unsent drafts.
+
+For standalone use without the browser service, the manual login helper is:
+
 ```sh
 .venv/bin/python web_inference.py --provider gemini --login
 .venv/bin/python web_inference.py --provider qwen --login
@@ -182,14 +194,16 @@ For another installed executable, add
 Lightpanda itself needs no desktop browser during inference.
 
 The managed browser endpoint is bound to loopback and recorded privately alongside
-the native profile under `~/.local/share/seth/web/<provider>/`. Stop the managed
-browser normally with:
+the native profile under `~/.local/share/seth/web/<provider>/`. `seth down` closes
+the managed browser normally and flushes its profile. The browser service repairs
+closed tabs and reopens a closed window while running. For a standalone browser
+without the service, close it with:
 
 ```sh
 .venv/bin/python web_inference.py --provider gemini --close-browser
 ```
 
-Closing this browser or restarting the computer may require `--login` again.
+Closing this browser or restarting the computer may require signing in again.
 The API backend is available while web authentication is being repaired.
 
 For Lightpanda, alternatively use an existing browser to export the site's cookies
@@ -395,21 +409,33 @@ VM window's position or visibility. No overlay code runs in Windows, and the
 indicator is outside the guest framebuffer used by Seth's SDK capture.
 These properties do not establish anti-cheat compatibility or undetectability.
 
-This host uses a persistent `seth-listener` user service with all five shortcuts and
-the indicator enabled. It starts when you log into the graphical desktop and
-stops on logout. It waits for your shortcut; startup does not request a cycle.
-The VM must be running before you request an answer cycle.
+`seth.target` groups two user services: `seth-listener` owns the shortcuts and
+indicator, and `seth-browser` owns persistent Chromium processes and provider
+readiness. Gemini and Qwen share one profile/window in this configuration, with
+one endpoint record per tab. The browser remains open when the listener restarts.
+An unavailable web provider does not prevent the listener from starting or the
+API from being selected. Both services report startup completion to systemd;
+provider readiness is shown separately from service readiness.
 
-The files in `deploy/` configure startup for this checkout at `~/work1/seth` and
-this host's built-in keyboard. The udev rules grant access to that keyboard and
+The application starts when you log into the graphical desktop and stops on
+logout. It waits for your shortcut; startup does not request a cycle. It can
+start with the VM off. The VM must be running before you request an answer cycle.
+
+The templates in `deploy/` are rendered by `seth install` using this checkout's
+absolute paths and Python environment. Reinstall after moving the checkout or
+changing service definitions. `--config /absolute/path/config.json` before
+`install` selects a configuration that subsequent commands remember. Installation
+replaces the older listener-only autostart and restarts that listener once on the
+next `seth up` if its definition changed. It does not install or update dependencies.
+
+The supplied udev rules match this host's built-in keyboard. They grant access to it and
 `/dev/uinput` to the active local desktop user; the module configuration loads
 `uinput` at boot. With these installed, manual `setfacl` is unnecessary after
-reboot. To install or restore this setup (adjust the service path and keyboard
-rule when moving to another machine):
+reboot. To install or restore the setup, adjust the keyboard rule when moving to
+another machine, install the dependencies, then run:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cp deploy/seth-listener.service ~/.config/systemd/user/
+.venv/bin/pip install -r requirements-browser.txt -r requirements-overlay.txt
 sudo install -m 644 deploy/70-seth-hotkey.rules /etc/udev/rules.d/
 sudo install -m 644 deploy/seth-uinput.conf /etc/modules-load.d/
 sudo modprobe uinput
@@ -417,17 +443,37 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --action=change --subsystem-match=input
 sudo udevadm trigger --action=change --subsystem-match=misc --sysname-match=uinput
 sudo udevadm settle
-systemctl --user daemon-reload
-systemctl --user enable --now seth-listener
+./seth install
+seth up
 ```
 
-Check with `systemctl --user status seth-listener` and follow progress with
-`journalctl --user -u seth-listener -f`. Use `systemctl --user restart seth-listener`
-after code/config changes, or `systemctl --user stop seth-listener` to stop it for
-this session. To disable automatic startup, use
-`systemctl --user disable --now seth-listener`. Start no second listener while the
-service is running. A newly started listener resets to API, Single capture,
-and the Full indicator with white text.
+The installed `~/.local/bin/seth` symlink works from any directory when that
+directory is on PATH. The checkout's `./seth` command also works directly.
+
+| Command | Action |
+| --- | --- |
+| `seth up` or `seth` | Ensure both services are running; report providers and API connectivity |
+| `seth down` | Cancel listener work, then stop Seth and close its browsers |
+| `seth restart listener` | Restart the listener while preserving the browser sessions |
+| `seth restart browser` | Restart browser management and Chromium |
+| `seth restart all` | Restart the application, including its browsers |
+| `seth status` / `seth status --json` | Read service and cached provider readiness |
+| `seth logs [listener\|browser\|all]` | Follow logs; add `--no-follow` to print recent entries |
+| `seth doctor` | Check services, keyboard/uinput access, and API connectivity |
+
+`up` is safe to repeat, including when the target is already active but a child
+service has stopped. Successful startup means the services started; individual
+providers may still need login, verification, or model selection. `doctor`
+returns a nonzero status for issues needing attention. API checks use an empty
+HEAD request, without credentials, image upload, or inference; reachable does
+not establish valid credentials or a working model. The API endpoint is external
+in this setup; there is no local inference server or tunnel for Seth to start.
+Lightpanda remains an optional runtime started on demand for configured providers.
+
+To disable automatic startup, run `systemctl --user disable seth.target`; use
+`seth down` to stop the current session too. Start no second listener while the
+service is running. A newly started listener resets to API, Single capture, and
+the Full indicator with white text.
 If KDE's display is still starting, the service retries until it can open the
 overlay. A process lock prevents duplicate listeners; an abandoned socket from a
 crash is recovered automatically after verifying that it has no live listener.
