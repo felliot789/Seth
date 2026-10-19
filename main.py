@@ -12,12 +12,13 @@ import threading
 import time
 
 from inference import AIError, create_client
+from cancellation import CycleCancellation
 from capture import SethCapture
 from clicker import SethClicker
 from hotkey import SethHotkey
 from settings import load_config
 from service_runtime import notify
-from scroll_capture import ScrolledQuestion, ScrollLimitError, ScrollNavigationError
+from scroll_capture import ScrolledQuestion, ScrollLimitError, ScrollNavigationError, ScrollLayoutError
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
 
@@ -37,6 +38,9 @@ class SethEngine:
         self.backend = VirtualBoxBackend(self.config)
         self.capture = SethCapture(self.config, self.backend)
         self.stop_event = threading.Event()
+        self.cancel_event = CycleCancellation(self.stop_event)
+        self._state_lock = threading.Lock()
+        self._cycle_active = False
         self.manual_selection = manual_selection
         if manual_selection and initial_provider not in self.PROVIDERS:
             raise ValueError("Manual inference provider must be api, gemini, or qwen.")
@@ -56,7 +60,7 @@ class SethEngine:
             config = config | {"inference": {"backend": "api" if provider == "api" else "web"}}
             if provider != "api":
                 config = config | {"web": config.get("web", {}) | {"providers": [provider]}}
-        return create_client(config, stop_event=self.stop_event,
+        return create_client(config, stop_event=self.cancel_event,
                              progress=lambda label: setattr(self, "progress", ("thinking", label)))
 
     @property
@@ -100,25 +104,51 @@ class SethEngine:
     def run_cycle(self):
         if not self._cycle_lock.acquire(blocking=False):
             return {"status": "busy"}
+        self._begin_cycle()
         return self._run_locked_cycle()
 
     def request_cycle(self):
         if self.stop_event.is_set() or not self._cycle_lock.acquire(blocking=False):
             return False
+        self._begin_cycle()
         self._worker = threading.Thread(target=self._run_locked_cycle, name="seth-cycle")
         try:
             self._worker.start()
         except Exception:
+            with self._state_lock:
+                self._cycle_active = False
             self._cycle_lock.release()
             raise
         return True
+
+    def _begin_cycle(self):
+        with self._state_lock:
+            self.cancel_event.clear()
+            self._cycle_active = True
+
+    def interrupt_cycle(self):
+        with self._state_lock:
+            if not self._cycle_active:
+                self.progress = ("idle", "Idle")
+                return False
+            self.cancel_event.set()
+            self.progress = ("cancelled", "Cancelling")
+            return True
+
+    def _check_cancelled(self):
+        if self.cancel_event.is_set():
+            raise AIError("Cycle cancelled; no further selections.", "cancelled")
 
     def _run_locked_cycle(self):
         try:
             return self._execute_cycle()
         finally:
             # Keep provider/mode stable through result metadata and logging too.
-            self._cycle_lock.release()
+            with self._state_lock:
+                self._cycle_active = False
+                if self.cancel_event.interrupted.is_set():
+                    self.progress = ("idle", "Idle")
+                self._cycle_lock.release()
 
     def _execute_cycle(self):
         result = {"status": "error"}
@@ -127,12 +157,13 @@ class SethEngine:
         navigation = None
         decision = None
         try:
-            if self.stop_event.is_set():
+            if self.cancel_event.is_set():
                 result = {"status": "cancelled"}
                 return result
             self.progress = ("capturing", "Capturing")
             self.ai.validate_config()
             frame = self.capture.capture_frame()
+            self._check_cancelled()
             LOG.info("Captured %s (VM %s, screen %s, %sx%s)", frame.path,
                      frame.display.vm_uuid, frame.display.screen, frame.display.width, frame.display.height)
             if (getattr(self.ai, "supports_scroll_context", False)
@@ -141,27 +172,32 @@ class SethEngine:
                 capture_options = self.config.get("capture", {})
                 scroll_config = self.config | {"capture": capture_options | {
                     "scroll_context": capture_options.get("scroll_context", {}) | {"enabled": True}}}
-                question = ScrollCollector(scroll_config, self.capture, self.stop_event,
-                                           report=lambda label: setattr(self, "progress", ("capturing", label))).collect(frame)
+                question = ScrollCollector(scroll_config, self.capture, self.cancel_event,
+                                           report=lambda label: setattr(self, "progress", ("capturing", label))).collect(frame, layout_client=self.ai)
                 frame = question.frame
+                if isinstance(question, ScrolledQuestion) and question.layout:
+                    LOG.info('Discovered scroll layout: %s', json.dumps(question.layout))
                 if question.contexts:
                     LOG.info("Collected %s scroll context sections; live answer frame %s", len(question.contexts), frame.path)
-                    if isinstance(question, ScrolledQuestion) and question.views:
-                        navigation = question.navigate(self.config, self.capture, self.stop_event,
-                                                       report=lambda label: setattr(self, 'progress', ('capturing', label)))
-                        LOG.info('Indexed %s distinct answer controls across %s views', len(navigation.controls), len(question.views))
+                if isinstance(question, ScrolledQuestion) and (question.views or question.layout):
+                    navigation = question.navigate(self.config, self.capture, self.cancel_event,
+                                                   report=lambda label: setattr(self, 'progress', ('capturing', label)))
+                    LOG.info('Indexed %s distinct answer controls across %s views', len(navigation.controls), len(question.views))
+            self._check_cancelled()
             LOG.info("Waiting for Seth to identify the answer selections...")
             self.progress = ("thinking", "Waiting")
             if navigation is not None:
                 raw = self.ai.analyze_screenshot(frame.path, context_images=navigation.contexts,
                                                  control_regions=question.regions, scroll_targets=navigation.payload)
+                self._check_cancelled()
                 decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height, scroll_navigation=True)
             else:
                 raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
                        if question is not None and question.contexts else self.ai.analyze_screenshot(frame.path))
+                self._check_cancelled()
                 decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
             plan = navigation.plan(decision) if navigation is not None and decision is not None else None
-            if self.stop_event.is_set():
+            if self.cancel_event.is_set():
                 result = {"status": "cancelled"}
             elif decision is None:
                 result = {"status": "no_action"}
@@ -183,7 +219,7 @@ class SethEngine:
                         target_frame, target = navigation.prepare(selection)
                         self.progress = ('selecting', f'Selecting {len(completed_clicks) + 1}/{len(plan)}')
                         self.capture.verify_target(target_frame, target['click_x'], target['click_y'])
-                        click = self.clicker.click(target_frame, target['click_x'], target['click_y'], self.stop_event)
+                        click = self.clicker.click(target_frame, target['click_x'], target['click_y'], self.cancel_event)
                         completed_clicks.append(click | {key: target[key] for key in
                                                         ('target_id', 'target_view', 'row', 'choice', 'option') if key in target})
                         navigation.verify_selection(target_frame, target)
@@ -193,15 +229,15 @@ class SethEngine:
                     result = {'status': 'clicked', 'decision': decision, 'click_count': len(completed_clicks), 'clicks': completed_clicks}
                 elif decision["action"] == "select":
                     for selection in decision["selections"]:
-                        if self.stop_event.is_set():
+                        if self.cancel_event.is_set():
                             raise VMError("Cycle cancelled; no further selections.")
                         if question is not None and question.contexts:
-                            question.verify_identity(self.capture, self.stop_event)
+                            question.verify_identity(self.capture, self.cancel_event)
                         self.capture.verify_target(frame, selection["click_x"], selection["click_y"])
-                        click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.stop_event)
+                        click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.cancel_event)
                         completed_clicks.append(click | {key: selection[key] for key in ("row", "choice", "option") if key in selection})
                         if grounded:
-                            self.capture.verify_selection(frame, selection, self.stop_event)
+                            self.capture.verify_selection(frame, selection, self.cancel_event)
                             completed_clicks[-1]["selection_verified"] = True
                             if question is not None and question.contexts:
                                 question.selected_controls.append(selection)
@@ -209,13 +245,13 @@ class SethEngine:
                     result = {"status": "clicked", "decision": decision, "click_count": len(completed_clicks), "clicks": completed_clicks}
                 else:
                     if question is not None and question.contexts:
-                        question.verify_identity(self.capture, self.stop_event)
+                        question.verify_identity(self.capture, self.cancel_event)
                     if grounded:
                         self.capture.verify_target(frame, decision["click_x"], decision["click_y"])
-                    click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.stop_event)
+                    click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.cancel_event)
                     if grounded:
                         completed_clicks.append(click)
-                        self.capture.verify_selection(frame, decision, self.stop_event)
+                        self.capture.verify_selection(frame, decision, self.cancel_event)
                         click["selection_verified"] = True
                     result = {"status": "clicked", "decision": decision, "click": click}
                 self.cycle_count += 1
@@ -229,10 +265,14 @@ class SethEngine:
                 result.update(error_code="scroll_limit", required_views=error.required_views, max_views=error.max_views)
             elif isinstance(error, ScrollNavigationError):
                 result['error_code'] = 'scroll_navigation'
+            elif isinstance(error, ScrollLayoutError):
+                result['error_code'] = 'scroll_layout'
         except Exception:
             # Do not dump request objects, headers, or credentials in a traceback.
             result = {"status": "error", "error": "Unexpected cycle failure; no further action will be attempted."}
         finally:
+            if self.cancel_event.is_set():
+                result.update(status="cancelled", error_code="cancelled")
             status = result["status"]
             label = {"clicked": "Done", "dry_run": "Dry run ready", "no_action": "No selection",
                      "low_confidence": "Uncertain", "cancelled": "Cancelled", "error": "Error"}.get(status, status)
@@ -244,6 +284,8 @@ class SethEngine:
                 label = "Scroll limit"
             if result.get('error_code') == 'scroll_navigation':
                 label = 'Scroll stopped'
+            if result.get('error_code') == 'scroll_layout':
+                label = 'Scroll layout'
             if result.get("error_code", "").startswith("browser_"):
                 label = {"browser_timeout": "Web timeout", "browser_login": "Web sign-in",
                          "browser_limit": "Web limit", "browser_busy": "Browser busy",
@@ -270,6 +312,8 @@ class SethEngine:
         if navigation is not None:
             result['scroll_navigation'] = True
             result['returned_views'] = navigation.returned_views
+        if isinstance(question, ScrolledQuestion) and question.layout:
+            result['scroll_layout'] = question.layout
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
@@ -349,12 +393,14 @@ def main():
                 hotkey = SethHotkey(engine.request_cycle, config.get("hotkey", {}).get("devices"),
                                     toggle_callback=overlay.toggle if overlay is not None else None,
                                     provider_callback=engine.cycle_provider, capture_callback=engine.toggle_capture,
-                                    text_color_callback=overlay.toggle_text_color if overlay is not None else None)
+                                    text_color_callback=overlay.toggle_text_color if overlay is not None else None,
+                                    interrupt_callback=engine.interrupt_cycle)
             if hotkey is not None:
                 hotkey.start()
             LOG.info("Host listener ready (%s). Run: python3 main.py --mode trigger", "clicks enabled" if args.execute else "dry run")
             if hotkey is not None:
                 LOG.info("Press Ctrl+D+F together, then release to capture and answer one question.")
+                LOG.info("Ctrl+Shift+G interrupts the current run and returns to idle.")
                 LOG.info("Ctrl+E+R cycles API / Gemini / Qwen; Ctrl+Shift+E+R toggles Single / Scroll. Selected: %s", engine.indicator_selection)
             if overlay is not None:
                 overlay.poll(engine.progress, engine.indicator_selection)

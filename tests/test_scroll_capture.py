@@ -80,7 +80,7 @@ class ScrollCaptureTests(unittest.TestCase):
 
     def test_native_thumb_and_both_arrows_are_required_in_the_configured_column(self):
         region = (360, 151, 684, 464)
-        for shade in (95, 139):
+        for shade in (95, 139, 209):
             bar = find_scrollbar(screen(shade=shade), region)
             self.assertIsNotNone(bar)
             self.assertEqual(bar.height, 100)
@@ -219,6 +219,40 @@ class ScrollSDKTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(VMError):
                 sdk_operation(self.request(operation='move', **changes), lambda *args: manager)
             self.assertEqual(manager.mouse.events, [])
+
+    def test_wheel_ticks_are_button_free_and_keep_both_directions_and_display_origin(self):
+        for ticks in (-3, 2):
+            manager = FakeManager()
+            manager.console.display.origin = (100, -200)
+            with patch('vbox_backend.time.sleep'):
+                result = sdk_operation(self.request(operation='wheel', ticks=ticks,
+                                      expected=TEST_DISPLAY | {'x_origin':100,'y_origin':-200}), lambda *args: manager)
+            self.assertEqual(result['wheel_ticks'], ticks)
+            self.assertEqual(manager.mouse.events[0], (401, -79, 0, 0, 0))
+            self.assertEqual(manager.mouse.events[1:], [(401, -79, 1 if ticks > 0 else -1, 0, 0)] * abs(ticks))
+            self.assertTrue(manager.closed and manager.unlocked)
+
+    def test_invalid_stale_or_cancelled_wheel_input_sends_no_ticks(self):
+        for changes in ({'ticks': 0}, {'ticks': True}, {'ticks': 33}, {'ticks': 1.5},
+                        {'captured_at': time.monotonic()-100}, {'expected': TEST_DISPLAY | {'session_pid':99}}):
+            manager = FakeManager()
+            with self.subTest(changes=changes), self.assertRaises(VMError):
+                sdk_operation(self.request(operation='wheel', ticks=1) | changes, lambda *args: manager)
+            self.assertFalse(manager.mouse.events)
+
+    def test_cancellation_between_wheel_ticks_stops_without_retry_or_press(self):
+        manager = FakeManager()
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'stop'
+            original = manager.mouse.putMouseEventAbsolute
+            def put(*args):
+                original(*args)
+                if args[2]:
+                    marker.touch()
+            manager.mouse.putMouseEventAbsolute = put
+            with patch('vbox_backend.time.sleep'), self.assertRaisesRegex(VMError, 'cancelled'):
+                sdk_operation(self.request(operation='wheel', ticks=3, cancel_path=str(marker)), lambda *args: manager)
+        self.assertEqual(manager.mouse.events, [(301, 121, 0, 0, 0), (301, 121, 1, 0, 0)])
 
     def test_single_press_moves_in_bounded_steps_and_always_releases(self):
         manager = FakeManager()

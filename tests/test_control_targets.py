@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from control_targets import annotated_controls, catalog_controls, ground_decision, locate_control, selection_visible
 from capture import Frame, SethCapture
 from inference import AIError, DecisionClient, build_control_prompt
+from main import SethEngine
 from tests.fake_vbox import TEST_DISPLAY
 from vbox_backend import GuestDisplay, VMError
 
@@ -52,6 +53,47 @@ class ControlTargetTests(unittest.TestCase):
             control, _, _ = locate_control(before, 20, 20, "radio")
             self.assertTrue(selection_visible(before, after, control))
             self.assertEqual(catalog_controls(after), {})
+
+    def test_real_native_controls_with_persistent_focus_are_confirmed(self):
+        fixtures = Path(__file__).parent / "fixtures/controls"
+        for layout, kind in (("table", "radio"), ("single", "radio"), ("mcma", "checkbox")):
+            with self.subTest(layout=layout), \
+                    Image.open(fixtures / f"native-{kind}-{layout}-unchecked.png") as before, \
+                    Image.open(fixtures / f"native-{kind}-{layout}-selected-focus.png") as selected:
+                control, _, _ = locate_control(before, 20, 20, kind)
+                self.assertTrue(selection_visible(before, selected, control))
+                # Focus decoration alone must never count as a selection.
+                focus_only = selected.copy()
+                box = tuple(control["box"])
+                focus_only.paste(before.crop(box), box)
+                self.assertFalse(selection_visible(before, focus_only, control))
+                # A selected glyph within a changed row/page still fails.
+                changed_row = Image.new("RGB", before.size, "#ccc")
+                changed_row.paste(selected.crop(box), box)
+                self.assertFalse(selection_visible(before, changed_row, control))
+                self.assertEqual(catalog_controls(selected), {})
+
+    def test_all_ten_real_table_controls_are_numbered_on_alternating_rows(self):
+        fixture = Path(__file__).parent / "fixtures/controls/native-radio-ten-controls.png"
+        with Image.open(fixture) as glyphs:
+            image = Image.new("RGB", (400, 500), "white")
+            image.paste(glyphs, (40, 40))
+        for candidate in (image, Image.eval(image, lambda value: 255 - value)):
+            with self.subTest(background=candidate.getpixel((0, 0))):
+                controls = catalog_controls(candidate)
+                self.assertEqual(len(controls), 10)
+                self.assertEqual(set(controls), {f"{i:02d}" for i in range(1, 11)})
+                self.assertEqual(controls["10"], {"kind": "radio", "box": [156, 361, 172, 377]})
+                # The formerly missing tenth target must resolve and ground to
+                # the same original control, rather than merely print a badge.
+                control, x, y = locate_control(candidate, 164, 369, "radio")
+                self.assertEqual(control, controls["10"])
+                decision = DecisionClient().parse_coordinates(json.dumps({
+                    "action": "select", "selection_type": "classification", "confidence": .95,
+                    "explanation": "Select the tenth target.",
+                    "selections": [{"row": 5, "choice": "False", "target_id": "10"}]}),
+                    400, 500, control_targets=controls)
+                self.assertEqual((decision["selections"][0]["click_x"], decision["selections"][0]["click_y"]), (x, y))
 
     def test_radio_and_checkbox_sizes_and_dark_background(self):
         for kind in ("radio", "checkbox"):
@@ -95,6 +137,18 @@ class ControlTargetTests(unittest.TestCase):
                 draw_control(neighbors, kind, (60, 76), selected=True)
                 with self.assertRaises(AIError):
                     locate_control(neighbors, 60, 58, kind)
+
+    def test_filled_checkboxes_cannot_become_their_own_local_background(self):
+        for size in (16, 22, 30, 34):
+            image = self.image.copy()
+            left = 60 - size // 2
+            ImageDraw.Draw(image).rectangle((left, left, left + size - 1, left + size - 1),
+                                            outline="#aaa", width=2, fill="#0877c9")
+            for candidate in (image, Image.eval(image, lambda value: 255 - value)):
+                with self.subTest(size=size, background=candidate.getpixel((0, 0))):
+                    self.assertEqual(catalog_controls(candidate), {})
+                    with self.assertRaises(AIError):
+                        locate_control(candidate, 60, 60, "checkbox")
 
     def test_precise_point_in_a_dense_table_keeps_its_own_control(self):
         draw_control(self.image, "radio", (60, 40), size=16)
@@ -310,6 +364,83 @@ class SelectionCaptureTests(unittest.TestCase):
         self.capture.backend.park_pointer.assert_called_once()
         self.capture.backend.click.assert_not_called()
         self.assertEqual(capture.call_count, 1)
+
+    def test_qwen_finishes_table_and_mcma_plans_with_persistent_native_focus(self):
+        self._check_native_plan("native-radio-table", 5, "classification")
+        self._check_native_plan("native-checkbox-mcma", 3, "multiple_answer")
+
+    def _check_native_plan(self, prefix, count, selection_type):
+        fixtures = Path(__file__).parent / "fixtures/controls"
+        with Image.open(fixtures / f"{prefix}-unchecked.png") as source, \
+                Image.open(fixtures / f"{prefix}-selected-focus.png") as selected:
+            unchecked, focused = source.convert("RGB"), selected.convert("RGB")
+        kind = "radio" if selection_type == "classification" else "checkbox"
+        control, _, _ = locate_control(unchecked, 20, 20, kind)
+        box = tuple(control["box"])
+        checked = unchecked.copy()
+        checked.paste(focused.crop(box), box)
+        display = GuestDisplay(**(TEST_DISPLAY | {"width": 300, "height": 450}))
+
+        # The full engine uses actual capture/target/selection checks. Only
+        # inference and VM input are replaced; focus persists after parking.
+        for missed_row in (None, 2):
+            with self.subTest(selection_type=selection_type, missed_row=missed_row), tempfile.TemporaryDirectory() as root:
+                selected_rows, clicked_rows = set(), []
+                focus_row = None
+
+                def screenshot(path):
+                    image = Image.new("RGB", (300, 450), "white")
+                    for row in range(count):
+                        glyph = focused if row == focus_row else checked if row in selected_rows else unchecked
+                        image.paste(glyph, (180, 40 + row * 78))
+                    image.save(path)
+                    return display, time.monotonic()
+
+                def click(frame, x, y, max_age, stop_event=None):
+                    nonlocal focus_row
+                    row = round((y - 60) / 78)
+                    self.assertEqual((x, y), (200, 60 + row * 78))
+                    clicked_rows.append(row)
+                    if row != missed_row:
+                        selected_rows.add(row)
+                        focus_row = row
+                    return {"click_x": x, "click_y": y}
+
+                engine = SethEngine({"project_dir": root, "clicker": {"delay_ms": [0, 0]}},
+                                    execute=True, manual_selection=True, initial_provider="qwen")
+                engine.ai.last_provider = "qwen"
+                backend = Mock()
+                backend.capture.side_effect = screenshot
+                backend.click.side_effect = click
+                engine.capture.backend = engine.clicker.backend = backend
+                raw = {"action": "select", "selection_type": selection_type, "confidence": .95,
+                       "explanation": "Select all requested answers.", "selections": [
+                           ({"row": row + 1, "choice": "True"} if selection_type == "classification"
+                            else {"option": str(row + 1)}) | {"target_id": f"{row + 1:02d}"}
+                           for row in range(count)]}
+
+                def infer(path):
+                    with Image.open(path) as image:
+                        controls = catalog_controls(image)
+                    return json.dumps(DecisionClient().parse_coordinates(json.dumps(raw), 300, 450,
+                                                                         control_targets=controls))
+
+                with patch.object(engine.ai, "validate_config"), \
+                        patch.object(engine.ai, "analyze_screenshot", side_effect=infer) as inference:
+                    result = engine.run_cycle()
+                inference.assert_called_once()
+                if missed_row is None:
+                    self.assertEqual(result["status"], "clicked", result)
+                    self.assertEqual(clicked_rows, list(range(count)))
+                    self.assertEqual(result["click_count"], count)
+                    self.assertTrue(all(click["selection_verified"] for click in result["clicks"]))
+                else:
+                    self.assertEqual(result["status"], "error", result)
+                    self.assertEqual(clicked_rows, [0, 1, 2])
+                    self.assertEqual(result["clicks_completed"], 3)
+                    self.assertTrue(all(click["selection_verified"] for click in result["clicks"][:2]))
+                    self.assertNotIn("selection_verified", result["clicks"][2])
+                self.assertEqual(backend.park_pointer.call_count, len(clicked_rows))
 
 
 if __name__ == "__main__":

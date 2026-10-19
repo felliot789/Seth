@@ -1,4 +1,4 @@
-"""Linux run, indicator, text-color, provider, and capture chords, including on Wayland."""
+"""Linux run, interrupt, indicator, provider, and capture chords, including on Wayland."""
 
 import logging
 import select
@@ -12,6 +12,7 @@ SHIFT = {42, 54}
 LETTERS = {32, 33}  # D, F
 SELECT_LETTERS = {18, 19}  # E, R
 COLOR_LETTERS = {16, 17}  # Q, W
+INTERRUPT_LETTERS = {34}  # G
 
 
 class ChordFilter:
@@ -21,7 +22,8 @@ class ChordFilter:
     Holding keys, autorepeat, or an incomplete chord never queues extra cycles.
     """
 
-    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False, enable_text_color=False):
+    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False, enable_text_color=False,
+                 enable_interrupt=False):
         self.down = set()
         self.pending = []
         self.pending_group = None
@@ -35,6 +37,8 @@ class ChordFilter:
                 "provider" if enable_provider else None, "capture" if enable_capture else None)
         if enable_text_color:
             self.bindings[frozenset(COLOR_LETTERS)] = (None, "text_color")
+        if enable_interrupt:
+            self.bindings[frozenset(INTERRUPT_LETTERS)] = (None, "interrupt")
         self.letters = set().union(*self.bindings)
         self.chord_keys = CTRL | SHIFT | self.letters
 
@@ -113,12 +117,13 @@ class ChordFilter:
 
 class SethHotkey:
     def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, capture_callback=None,
-                 text_color_callback=None):
+                 text_color_callback=None, interrupt_callback=None):
         self.callback = callback
         self.toggle_callback = toggle_callback
         self.provider_callback = provider_callback
         self.capture_callback = capture_callback
         self.text_color_callback = text_color_callback
+        self.interrupt_callback = interrupt_callback
         self.paths = devices
         self.devices = []
 
@@ -142,6 +147,8 @@ class SethHotkey:
                     required = LETTERS | (SELECT_LETTERS if self.provider_callback or self.capture_callback else set())
                     if self.text_color_callback is not None:
                         required |= COLOR_LETTERS
+                    if self.interrupt_callback is not None:
+                        required |= INTERRUPT_LETTERS
                     if (device.name.startswith("Seth shortcut") or not required <= keys
                             or not keys & CTRL or (self.paths is None and evdev.ecodes.EV_REL in caps)):
                         continue
@@ -153,7 +160,8 @@ class SethHotkey:
                         enable_toggle=self.toggle_callback is not None,
                         enable_provider=self.provider_callback is not None,
                         enable_capture=self.capture_callback is not None,
-                        enable_text_color=self.text_color_callback is not None)))
+                        enable_text_color=self.text_color_callback is not None,
+                        enable_interrupt=self.interrupt_callback is not None)))
                     LOG.info("Shortcut keyboard: %s (%s)", device.name, path)
                     device = virtual = None
                 finally:
@@ -189,7 +197,10 @@ class SethHotkey:
                     for code, value in forwarded:
                         virtual.write(self.evdev.ecodes.EV_KEY, code, value)
                     virtual.syn()
-                    if fired == "toggle":
+                    if fired == "interrupt":
+                        accepted = self.interrupt_callback()
+                        LOG.info("Ctrl+Shift+G: %s", "interrupt requested" if accepted else "already idle")
+                    elif fired == "toggle":
                         self.toggle_callback()
                         LOG.info("Ctrl+Shift+D+F: indicator display cycled")
                     elif fired == "text_color":

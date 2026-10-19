@@ -37,6 +37,7 @@ class ScrollingVM(SethCapture):
         self.selected, self.drags, self.clicks = set(), [], []
         self.header, self.stuck, self.drift = 'Question 1', False, 0
         self.mutate, self.fail_click = None, 0
+        self.focus_halo, self.focused = False, None
         self.centers = [(24, 65 + row * 190) for row in range(5)] if kind == 'checkbox' else [
             (x, 60 + row * 95) for row in range(9) for x in (170, 240)]
         self.config = {'project_dir': str(root), 'capture': {'max_age_seconds': 90, 'scroll_context': {
@@ -54,6 +55,8 @@ class ScrollingVM(SethCapture):
                 draw.text((8, 15 + row * 20), f'Question paragraph {row}: details {row * 37}', fill='black')
             return image
         for index, (x, y) in enumerate(self.centers):
+            if self.focus_halo and self.focused == (panel, index):
+                draw.rectangle((x - 17, y - 17, x + 16, y + 16), outline='#4d94d7', width=4)
             draw_control(image, self.kind, (x, y), selected=(panel, index) in self.selected)
             if self.kind == 'checkbox':
                 draw.text((48, y - 8), f'Option {index + 1}, graph {index * 31 + 11}', fill='black')
@@ -100,6 +103,7 @@ class ScrollingVM(SethCapture):
         if abs(cx + panel - x) > 2 or abs(cy + 157 - offset - y) > 2:
             raise AssertionError('Click missed the actual native control')
         self.clicks.append((panel, index))
+        self.focused = (panel, index)
         if len(self.clicks) != self.fail_click:
             if self.kind == 'radio':
                 self.selected.difference_update({(panel, i) for i in range(len(self.centers)) if self.centers[i][1] == cy})
@@ -158,6 +162,17 @@ class ScrollNavigationTests(unittest.TestCase):
         self.execute(vm, nav, self.decision(nav, ids, 'classification'))
         self.assertEqual(vm.selected, {(360, index) for index in range(0, 18, 2)})
         self.assertEqual(len(vm.clicks), 9)
+        nav.verify_current()
+
+    def test_persistent_native_focus_is_checked_through_scroll_returns(self):
+        vm = ScrollingVM(self.root, 'radio')
+        vm.focus_halo = True
+        _, nav = self.collect(vm)
+        ids = [f'{index:02d}' for index in range(1, 19, 2)]
+        self.execute(vm, nav, self.decision(nav, ids, 'classification'))
+        self.assertEqual(vm.selected, {(360, index) for index in range(0, 18, 2)})
+        self.assertEqual(len(vm.clicks), 9)
+        self.assertGreaterEqual(len(nav.returned_views), 2)
         nav.verify_current()
 
     def test_two_panels_keep_independent_views_and_identical_local_coordinates(self):

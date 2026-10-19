@@ -18,9 +18,9 @@
     "max_age_seconds": 300,
     "scroll_context": {
       "enabled": false,
-      "regions": [[0.05, 0.28, 0.5, 0.86], [0.5, 0.28, 0.95, 0.86]],
-      "identity_box": [0.05, 0.15, 0.35, 0.28],
-      "max_views": 12
+      "layout": "auto",
+      "scroll_method": "wheel",
+      "max_views": 32
     }
   },
   "clicker": {

@@ -1,5 +1,127 @@
 # Development milestones
 
+## 2026-10-19 — Capture long questions with image answer choices
+
+- Raise the supported capture bound from 12 to 32 views. Extend bounded upward
+  endpoint probing to cover the full supported wheel capture, including return
+  trips from the bottom of long diagram questions.
+- For wheel pages without fixed overlays, assemble one continuous question from
+  the verified pixel offsets, removing duplicated overlap without resizing the
+  diagrams. Apply each stable badge once after assembly while retaining original
+  capture coordinates for navigation. Keep the 8192-pixel and 16-megapixel bounds.
+- Reject round letters embedded in diagram text as unchecked answer controls by
+  requiring a clear gap around their outlines. Preserve selected-control blockers
+  and retain an anonymous native letter crop as a regression fixture.
+- Passed 103 scroll, document, control and layout regressions plus nine interrupt
+  checks. The live image-choice question captured 16 views and five controls;
+  all five original target positions passed return verification, with zero
+  answer clicks or model requests. Reloaded the listener with the updated code.
+
+## 2026-10-19 — Interrupt the current run without stopping Seth
+
+- Add Ctrl+Shift+G to cancel a running cycle and return the indicator to Idle
+  after cleanup. Preserve the selected provider and capture mode, discard late
+  answers, and prevent new work from overlapping a cancelled operation.
+- Separate cycle cancellation from listener shutdown and carry it through browser
+  inference, scrolling, click delays and selection checks. Log selections already
+  applied when a multi-answer run is interrupted.
+- Run API network requests in a cancellable helper so blocked responses and
+  partial streams can be interrupted without waiting for the network timeout.
+  Reap the helper before accepting another run.
+- Passed 113 checks covering the interrupt chord, capture/scroll cancellation,
+  all provider paths, blocked API responses and streams, partial selections,
+  fresh subsequent runs, browser cancellation and the final wheel limit check.
+  Saved the log privately as `captures/interrupt-validation.log`. Verified that
+  the running listener has loaded the shortcut.
+
+## 2026-10-18 — Start verified whole-page capture without a layout-model wait
+
+- Recognize clear bordered question columns from the native outer viewport,
+  full-width header divider and unique matching vertical borders. Derive the
+  moving area and stationary browser chrome from the screenshot; retain provider
+  discovery for ambiguous pages, independent panels and scrollbar-free layouts.
+- Report when provider layout inspection is necessary. Locally recognized pages
+  skip that request and immediately use the existing overlap, endpoint and
+  content checks. This removes the long discovery wait that allowed sidebar
+  reflow to invalidate the original capture before the first scroll event.
+- Add synthetic regressions for expanded/collapsed sidebars, ambiguous geometry,
+  missing browser grounding and changed content before input.
+- Park the pointer before the wheel layout baseline so an initial hovered row
+  cannot be mistaken for scrolling when the page is already at its top. Keep
+  strict content checks after discovery and exercise the hovered-top case.
+- Passed 29 focused layout tests and eight final wheel tests. On the live page,
+  verified five captured sections, six controls, all section returns and all
+  three Qwen target positions, including a deliberately hovered starting row.
+  No answer clicks were sent. The real Qwen request returned valid IDs at 60%
+  confidence, so the unchanged 85% threshold correctly prevented selection.
+
+## 2026-10-18 — Scroll single long pages with guest wheel input
+
+- Added whole-page wheel capture and verified return trips without requiring a
+  native scrollbar. Send only button-free guest SDK events, establish endpoints
+  with stable probes, measure actual content displacement, and calibrate bounded
+  overlapping steps. Replay recorded ticks from the verified top and match the
+  target section before answer input. Independent panels retain native dragging.
+- Enable the wheel path in the supplied automatic-layout configuration. Explicit
+  `scrollable` declarations support scrollbar-free pages. Preserve cancellation,
+  VM identity, foreground matching, control IDs, selection confirmation and image
+  limits. Wheel collection discovers its view-limit requirement while scrolling
+  and stops before answer inference if the page is too long.
+- Corrected blank layout identity anchors: retain valid anchors, or ground a
+  stationary browser-chrome fallback using a locally verified outer viewport.
+  Blank identity without that evidence still rejects the layout.
+- All 290 tests passed in 331.542 seconds with the three browser integrations
+  enabled; two final stricter wheel checks also passed. A live one-tick probe
+  measured 150 pixels of question movement and restored the exact question pixels
+  and thumb position with no answer clicks. Reloaded the listener. A complete
+  live long-page answer cycle remains to be verified.
+
+## 2026-10-18 — Confirm native radio selections and retain the tenth target
+
+- Reproduced the recurring stop after the first table selection from saved VM
+  frames: the radio was selected, but its persistent blue focus rectangle failed
+  the surrounding-pixel check even after the pointer was parked. Permit that
+  bounded decoration while still requiring a newly filled interior, the control
+  outline, and stable surrounding context. Apply the same bounds to scroll
+  matching and previously selected controls, including viewport edges.
+- Corrected a separate missed tenth badge in the same table. Refine each control
+  against its local row background when cataloging and grounding, so a light gray
+  row is not judged against the page's white background. Keep the existing
+  outline, ambiguity, selected-interior, 64-control and ten-selection limits.
+- Retained anonymous native glyph pairs and the ten-control table crop. Added
+  all-ten detection in light/dark images, full five-row and three-checkbox engine
+  replays, rejection of a genuinely missed click, focus-only rejection, and nine
+  focused selections across scroll returns. The subsequent live MCMA failure in
+  the old listener had the same focus decoration and passes the patched check.
+- All 280 tests passed in 273.713 seconds with Lightpanda, Chromium and native
+  login integrations enabled. All 22 final control tests then passed after adding
+  the latest MCMA glyph and multi-selection replay. Reloaded the listener.
+
+## 2026-10-18 — Discover question and answer scrolling layouts
+
+- Added automatic screenshot layout inspection for API, Gemini and Qwen. Native
+  scrollbars are detected across the guest framebuffer and numbered locally;
+  the selected provider identifies question/answer areas and associates them
+  with those IDs. Explicit normalized bounds are converted on the host.
+- Support whole-page scrolling, independent panels in either order, and fixed
+  content beside scrolling content. Validate layout confidence, complete roles,
+  bounds, identity anchors and bounded exclusions before any scrollbar probe.
+  A reversible native drag verifies ownership before overlapping collection.
+- Reuse stable answer IDs and verified return trips. Track floating countdown
+  widgets as they move and become sticky, masking changing digits at their
+  actual locations and excluding fixed overlays from foreground alignment.
+  Revisit a captured question section before the first answer selection, even
+  when the URL and currently visible answers have not changed.
+- Automatic mode needs no configured region coordinates. Explicit manual mode
+  and existing configurations containing regions retain their previous behavior.
+  Unsupported/uncertain layouts report Scroll layout rather than falling through
+  to an incomplete single screenshot. Keep the existing view and image limits.
+- Added an anonymous real scrollbar fixture for mixed light/medium gray arrow
+  pixels, plus generated whole-page, independent, fixed/moving, overlay and
+  changed-layout exercises. The full 272-test browser regression run passed;
+  all 25 final focused checks passed after the off-screen identity and response
+  format refinements. See [layout validation](docs/scroll-layout-validation.md).
+
 ## 2026-10-18 — One command for Seth's application services
 
 - Added `seth up` (also bare `seth`), `down`, component restarts, `status`,

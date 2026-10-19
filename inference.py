@@ -93,7 +93,8 @@ def build_control_prompt(width, height, controls, *, scroll_context=False, scrol
     kinds = {identifier: control["kind"] for identifier, control in controls.items()}
     context = (
         'The uploaded image contains ONE question captured at different scroll positions. '
-        'Read EVERY panel/section in order and the final view to recover all question content and answer options. '
+        'A COMPLETE QUESTION image joins verified captures into one continuous page: read it top to bottom. '
+        'Otherwise read EVERY panel/section in order and the final view to recover all question content and answer options. '
         'Yellow badge IDs in ALL sections are selectable: the host will scroll back to the recorded control. '
         'Overlapping captures repeat content; the SAME ID always means the SAME physical control. '
         'Return each chosen ID only once, even when it appears in several sections. '
@@ -261,7 +262,7 @@ def create_client(config=None, *, stop_event=None, progress=None):
     backend = config.get("inference", {}).get("backend", "api")
     if backend == "api":
         from ai_client import SethAIClient
-        return SethAIClient(config)
+        return SethAIClient(config, stop_event=stop_event)
     if backend == "gemini_web":
         from gemini_web import GeminiWebClient
         return GeminiWebClient(config, stop_event=stop_event, progress=progress)

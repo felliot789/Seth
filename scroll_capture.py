@@ -1,24 +1,39 @@
 """Bounded screenshot-only context capture for native Chromium quiz scrollbars."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from control_targets import _components
+from scroll_limits import MAX_SCROLL_VIEWS
 from vbox_backend import VMError
 
 
 class ScrollLimitError(VMError):
     def __init__(self, required_views, max_views):
         super().__init__(f'Question requires {required_views} scroll views, exceeding the configured limit of '
-                         f'{max_views}; no scrolling or inference attempted.')
+                         f'{max_views}; no answer inference or selections attempted.')
         self.required_views, self.max_views = required_views, max_views
 
 
 class ScrollNavigationError(VMError):
     pass
+
+
+class ScrollLayoutError(VMError):
+    pass
+
+
+def masked(image, boxes=(), tracker=None, *, alignment=False):
+    if tracker is not None:
+        boxes = tracker.boxes(image, alignment=alignment)
+    image = image.convert('RGB')
+    draw = ImageDraw.Draw(image)
+    for left, top, right, bottom in boxes:
+        draw.rectangle((left, top, right - 1, bottom - 1), fill='white')
+    return image
 
 
 @dataclass(frozen=True)
@@ -27,6 +42,8 @@ class Scrollbar:
     top: int
     bottom: int
     panel: tuple
+    content: tuple = ()
+    viewport: tuple = ()
 
     @property
     def height(self):
@@ -46,15 +63,16 @@ def pixel_box(normalized, size):
     return tuple(round(v * size[i % 2]) for i, v in enumerate(normalized))
 
 
-def find_scrollbar(image, region):
+def find_scrollbars(image, region=None, *, right_edge=False):
     """Require one solid gray thumb and matching native up/down arrow buttons."""
+    region = region or (0, 0, image.width, image.height)
     left, top, right, bottom = region
-    # Scrollbars must be at the right edge of their configured question column.
-    left = max(left, right - round((right - left) * .22))
+    if right_edge:
+        left = max(left, right - round((right - left) * .22))
     crop = image.crop((left, top, right, bottom)).convert('RGB')
     gray = crop.convert('L')
     mask = {(x, y) for y in range(gray.height) for x in range(gray.width)
-            if 70 <= gray.getpixel((x, y)) <= 170}
+            if 70 <= gray.getpixel((x, y)) <= 215}
     shapes = []
     for component in _components(mask):
         xs, ys = zip(*component)
@@ -92,7 +110,26 @@ def find_scrollbar(image, region):
         actual_thumb = (thumb[0] + left, thumb[1] + top, thumb[2] + left, thumb[3] + top)
         panel = (region[0], max(region[1], ups[0][1] + top - 8),
                  min(region[2], actual_thumb[2] + 8), min(region[3], downs[0][3] + top + 8))
-        found.append(Scrollbar(actual_thumb, track_top, track_bottom, panel))
+        # A contrasting native rail gives an exact viewport edge, preventing
+        # a rounded model box from including browser chrome or the taskbar.
+        column = min(crop.width - 1, thumb[2] + 3)
+        color = crop.getpixel((column, track_top - top + 2))
+        def rail(y):
+            return max(abs(a - b) for a, b in zip(crop.getpixel((column, y)), color)) <= 3
+        rail_top, rail_bottom = track_top - top, track_bottom - top
+        while rail_top > 0 and rail(rail_top - 1):
+            rail_top -= 1
+        while rail_bottom < crop.height and rail(rail_bottom):
+            rail_bottom += 1
+        viewport = ()
+        if abs(rail_top - ups[0][1]) <= 20 and abs(rail_bottom - downs[0][3]) <= 20:
+            viewport = rail_top + top, rail_bottom + top
+        found.append(Scrollbar(actual_thumb, track_top, track_bottom, panel, viewport=viewport))
+    return sorted(found, key=lambda bar: (bar.thumb[0], bar.top))
+
+
+def find_scrollbar(image, region):
+    found = find_scrollbars(image, region, right_edge=True)
     if len(found) > 1:
         raise VMError('More than one native scrollbar matched a question column; no scrolling attempted.')
     return found[0] if found else None
@@ -104,9 +141,11 @@ class ScrollView:
     panel: int
     frame: object
     region: tuple
-    bar: Scrollbar
+    bar: object
     fraction: float
     label: str
+    wheel_step: int | None = None
+    offset: int | None = None
 
 
 @dataclass
@@ -117,6 +156,12 @@ class ScrolledQuestion:
     identity_box: tuple
     selected_controls: list = field(default_factory=list)
     views: list = field(default_factory=list)
+    identity_boxes: list = field(default_factory=list)
+    ignore_boxes: list = field(default_factory=list)
+    layout: list = field(default_factory=list)
+    occlusion_boxes: list = field(default_factory=list)
+    overlay_tracker: object = None
+    wheel_navigation: object = None
 
     def navigate(self, config, capture, stop_event=None, report=lambda message: None):
         from scroll_navigation import ScrollNavigator
@@ -129,9 +174,10 @@ class ScrolledQuestion:
         if fresh.display != self.frame.display:
             raise VMError('VM display changed after context capture; no input.')
         with Image.open(self.frame.path) as expected, Image.open(fresh.path) as actual:
-            if expected.crop(self.identity_box).tobytes() != actual.crop(self.identity_box).tobytes():
-                raise VMError('Question header changed after context capture; start a fresh cycle.')
-            expected, actual = expected.convert('RGB'), actual.convert('RGB')
+            expected, actual = masked(expected, self.ignore_boxes, self.overlay_tracker), masked(actual, self.ignore_boxes, self.overlay_tracker)
+            for box in self.identity_boxes or ([self.identity_box] if self.identity_box else []):
+                if expected.crop(box).tobytes() != actual.crop(box).tobytes():
+                    raise VMError('Question header changed after context capture; start a fresh cycle.')
             # Prior verified selections may legitimately change color/focus.
             # Everything else in the captured question columns must still match.
             for control in self.selected_controls:
@@ -140,16 +186,18 @@ class ScrolledQuestion:
                        min(expected.width, right + 24), min(expected.height, bottom + 24))
                 actual.paste(expected.crop(box), box)
             for left, top, right, bottom in self.regions:
-                box = (left, top, max(left + 1, right - 24), bottom)
+                box = (left, top, max(left + 1, right - (0 if self.layout else 24)), bottom)
                 if expected.crop(box).tobytes() != actual.crop(box).tobytes():
                     raise VMError('Question or answer view changed after inference; start a fresh cycle.')
 
 
 class ScrollCollector:
-    def __init__(self, config, capture, stop_event=None, report=lambda message: None):
+    def __init__(self, config, capture, stop_event=None, report=lambda message: None, *, identity_boxes=None, ignore_boxes=(), overlay_tracker=None):
         self.config, self.capture = config, capture
         self.options = config.get('capture', {}).get('scroll_context', {})
         self.stop_event, self.report = stop_event, report
+        self.identity_boxes, self.ignore_boxes = identity_boxes, ignore_boxes
+        self.overlay_tracker = overlay_tracker
 
     def check(self, reference, fresh, identity_box):
         if self.stop_event is not None and self.stop_event.is_set():
@@ -157,8 +205,10 @@ class ScrollCollector:
         if fresh.display != reference.display:
             raise VMError('VM display changed during scroll capture; no further input.')
         with Image.open(reference.path) as before, Image.open(fresh.path) as after:
-            if before.crop(identity_box).tobytes() != after.crop(identity_box).tobytes():
-                raise VMError('Question header changed during scroll capture; no further input.')
+            before, after = masked(before, self.ignore_boxes, self.overlay_tracker), masked(after, self.ignore_boxes, self.overlay_tracker)
+            for box in self.identity_boxes if self.identity_boxes is not None else ([identity_box] if identity_box else []):
+                if before.crop(box).tobytes() != after.crop(box).tobytes():
+                    raise VMError('Question header changed during scroll capture; no further input.')
 
     def settled(self, reference, region, identity_box):
         deadline, previous = time.monotonic() + 3, None
@@ -167,7 +217,7 @@ class ScrollCollector:
             self.check(reference, fresh, identity_box)
             with Image.open(fresh.path) as image:
                 # Ignore the scrollbar itself, whose hover state may change.
-                content = image.crop((region[0], region[1], region[2] - 24, region[3])).tobytes()
+                content = masked(image, self.ignore_boxes, self.overlay_tracker).crop(region).tobytes()
             if content == previous:
                 return fresh
             if time.monotonic() >= deadline:
@@ -178,17 +228,23 @@ class ScrollCollector:
             else:
                 time.sleep(.15)
 
-    def collect(self, initial):
+    def collect(self, initial, *, layout_client=None):
         if not self.options.get('enabled', False):
             return ScrolledQuestion(initial, [], [], ())
+        mode = self.options.get('layout', 'manual' if 'regions' in self.options else 'auto')
+        if mode == 'auto':
+            from scroll_layout import discover_layout
+            return self.collect_layout(discover_layout(self, initial, layout_client))
+        if mode != 'manual':
+            raise ScrollLayoutError('Scroll layout must be auto or manual.')
         size = initial.display.width, initial.display.height
         regions = [pixel_box(box, size) for box in self.options.get('regions', [])]
         if not 1 <= len(regions) <= 4:
             raise VMError('Scroll capture needs one to four configured question columns.')
         identity = pixel_box(self.options.get('identity_box', [.05, .15, .35, .28]), size)
-        limit = self.options.get('max_views', 12)
-        if type(limit) is not int or not 2 <= limit <= 12:
-            raise VMError('Scroll capture max_views must be between 2 and 12.')
+        limit = self.options.get('max_views', MAX_SCROLL_VIEWS)
+        if type(limit) is not int or not 2 <= limit <= MAX_SCROLL_VIEWS:
+            raise VMError(f'Scroll capture max_views must be between 2 and {MAX_SCROLL_VIEWS}.')
         with Image.open(initial.path) as image:
             bars = [(region, find_scrollbar(image, region)) for region in regions]
         plans = []
@@ -221,7 +277,7 @@ class ScrollCollector:
                 start_y = round((bar.thumb[1] + bar.thumb[3] - 1) / 2)
                 self.capture.backend.drag(fresh, start_x, start_y, x, y,
                                           self.config.get('capture', {}).get('max_age_seconds', 90), self.stop_event)
-                current = self.settled(initial, original.panel, identity)
+                current = self.settled(initial, (original.panel[0], original.panel[1], original.panel[2] - 24, original.panel[3]), identity)
                 with Image.open(current.path) as image:
                     moved = find_scrollbar(image, region)
                 if moved is None or (step == 0 and moved.thumb[1] > moved.top + 20) or (
@@ -243,3 +299,67 @@ class ScrollCollector:
         answer_regions = [active_panels.get(box, (box[0], max(box[1], content_top), box[2], min(box[3], content_bottom)))
                           for box in regions]
         return ScrolledQuestion(final, contexts, answer_regions, identity, views=views)
+
+    def collect_layout(self, layout):
+        """Capture discovered areas with the same bounded, verified return path."""
+        if any(area.wheel for area in layout.areas):
+            from wheel_scroll import WheelScroll
+            return WheelScroll(self, layout).collect()
+        initial = layout.frame
+        self.identity_boxes, self.ignore_boxes = layout.identity_boxes, layout.ignore_boxes
+        self.overlay_tracker = layout.overlay_tracker
+        plans = [(area, max(1, math.ceil((area.bar.bottom - area.bar.top - area.bar.height)
+                                       / (.65 * area.bar.height))))
+                 for area in layout.areas if area.bar is not None]
+        limit = self.options.get('max_views', MAX_SCROLL_VIEWS)
+        if type(limit) is not int or not 2 <= limit <= MAX_SCROLL_VIEWS:
+            raise ScrollLayoutError(f'Scroll capture max_views must be between 2 and {MAX_SCROLL_VIEWS}.')
+        required = sum(intervals + 1 for _, intervals in plans)
+        if required > limit:
+            raise ScrollLimitError(required, limit)
+        # Verify ownership and restore the original position before collecting.
+        for area, _ in plans:
+            layout.probe(self, area)
+        views, contexts = [], []
+        current = self.capture.capture_frame()
+        layout.verify(self, current)
+        for index, (area, intervals) in enumerate(plans, 1):
+            for step in range(intervals + 1):
+                self.report(f'Reading {index}:{step + 1}/{intervals + 1}')
+                fresh = self.capture.capture_frame()
+                self.check(initial, fresh, ())
+                with Image.open(fresh.path) as image:
+                    bar = find_scrollbar(image, area.search)
+                if not layout.same_bar(area.bar, bar):
+                    raise ScrollLayoutError('Discovered scrollbar changed before capture; start a fresh cycle.')
+                fraction = step / intervals
+                self.capture.backend.drag(fresh, round((bar.thumb[0] + bar.thumb[2] - 1) / 2),
+                                          round((bar.thumb[1] + bar.thumb[3] - 1) / 2),
+                                          *bar.destination(fraction),
+                                          self.config.get('capture', {}).get('max_age_seconds', 90), self.stop_event)
+                current = self.settled(initial, area.box, ())
+                with Image.open(current.path) as image:
+                    moved = find_scrollbar(image, area.search)
+                if (not layout.same_bar(area.bar, moved)
+                        or (step == 0 and moved.thumb[1] > moved.top + 20)
+                        or (step == intervals and moved.thumb[3] < moved.bottom - 20)):
+                    raise ScrollLayoutError('Could not confirm the discovered scrollbar endpoint; no answer input.')
+                moved = replace(moved, panel=area.box, content=area.box)
+                views.append(ScrollView(f'{index}:{step}', index, current, area.search, moved, fraction,
+                                        f'{area.role.title()} panel {index}, section {step + 1}/{intervals + 1}'))
+        if plans:
+            self.capture.backend.park_pointer(current, self.config.get('capture', {}).get('max_age_seconds', 90), self.stop_event)
+        final = self.capture.capture_frame()
+        self.check(initial, final, ())
+        # Also retain fixed question/answer regions alongside the scrolling ones.
+        for area in layout.areas:
+            if area.bar is None:
+                with Image.open(initial.path) as before, Image.open(final.path) as after:
+                    if masked(before, self.ignore_boxes, self.overlay_tracker).crop(area.box).tobytes() != masked(after, self.ignore_boxes, self.overlay_tracker).crop(area.box).tobytes():
+                        raise ScrollLayoutError('Fixed question or answer area changed during capture; no answer input.')
+        active = {view.panel: view.key for view in views}
+        contexts = [{'path': view.frame.path, 'box': view.bar.panel, 'label': view.label}
+                    for view in views if view.key != active[view.panel]]
+        return ScrolledQuestion(final, contexts, [area.box for area in layout.areas], (), views=views,
+                                identity_boxes=layout.identity_boxes, ignore_boxes=layout.ignore_boxes,
+                                layout=layout.summary, occlusion_boxes=layout.occlusion_boxes, overlay_tracker=layout.overlay_tracker)

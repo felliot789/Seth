@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import math
+import multiprocessing
 import time
 from urllib.parse import urlsplit
 
@@ -17,13 +18,28 @@ from settings import load_config
 LOG = logging.getLogger("seth")
 
 
+def _api_request_worker(connection, api, payload):
+    """Own the HTTP socket in a process that can be stopped during a blocked read."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    try:
+        client = SethAIClient({"api": api})
+        connection.send({"content": client._request(payload)})
+    except AIError as error:
+        connection.send({"error": str(error), "code": error.code})
+    except Exception:
+        connection.send({"error": "Inference request failed; no click was attempted.", "code": "api_error"})
+    finally:
+        connection.close()
+
+
 class SethAIClient(DecisionClient):
     supports_scroll_context = True
 
-    def __init__(self, config=None, config_file=None):
+    def __init__(self, config=None, config_file=None, *, stop_event=None):
         self.config = config if config is not None else load_config(config_file)
         self.api = self.config.get("api", {})
         self.last_grounded = False
+        self.stop_event = stop_event
 
     @property
     def endpoint(self):
@@ -51,7 +67,7 @@ class SethAIClient(DecisionClient):
 
     def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
         self.last_grounded = False
-        if not context_images:
+        if not context_images and scroll_targets is None:
             return self._analyze_screenshot(image_path, prompt, response_format)
         if prompt:
             raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
@@ -59,11 +75,15 @@ class SethAIClient(DecisionClient):
         width, height = screenshot_size(image_path)
         from control_targets import annotated_controls
         with annotated_controls(image_path, context_images=context_images, regions=control_regions, scroll_targets=scroll_targets) as (upload, controls):
-            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=True,
+            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=bool(context_images),
                                                                       scroll_navigation=scroll_targets is not None), response_format)
             decision = self.parse_coordinates(raw, width, height, control_targets=controls)
         self.last_grounded = decision is not None
         return json.dumps(decision) if decision is not None else raw
+
+    def inspect_layout(self, image_path, prompt):
+        """A separate read-only layout request, never parsed as an answer plan."""
+        return self._analyze_screenshot(image_path, prompt)
 
     def _analyze_screenshot(self, image_path, prompt=None, response_format=None):
         self.validate_config()
@@ -84,6 +104,52 @@ class SethAIClient(DecisionClient):
         fmt = response_format if response_format is not None else self.api.get("response_format")
         if fmt:
             payload["response_format"] = {"type": fmt} if isinstance(fmt, str) else fmt
+        if self.stop_event is not None:
+            return self._cancellable_request(payload)
+        return self._request(payload)
+
+    def _cancellable_request(self, payload):
+        if self.stop_event.is_set():
+            raise AIError("Inference cancelled.", "cancelled")
+        # Spawn does not inherit the listener's keyboard, Qt, or VM state. The
+        # request and credentials cross a private pipe, never a command line.
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(target=_api_request_worker, args=(sender, self.api, payload), name="seth-api")
+        started = False
+        deadline = time.monotonic() + 15 + self.api.get("timeout_seconds", 120)
+        try:
+            process.start()
+            started = True
+            sender.close()
+            while True:
+                if self.stop_event.is_set():
+                    raise AIError("Inference cancelled.", "cancelled")
+                if receiver.poll(.05):
+                    try:
+                        result = receiver.recv()
+                    except EOFError:
+                        raise AIError("Inference helper stopped without a complete answer.") from None
+                    if self.stop_event.is_set():
+                        raise AIError("Inference cancelled.", "cancelled")
+                    if "error" in result:
+                        raise AIError(result["error"], result["code"])
+                    return result["content"]
+                if time.monotonic() >= deadline:
+                    raise AIError("Inference response timed out; no click was attempted.", "response_timeout")
+        finally:
+            sender.close()
+            receiver.close()
+            if started:
+                if process.is_alive():
+                    process.terminate()
+                process.join(1)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+                process.close()
+
+    def _request(self, payload):
         # No automatic retries: a failed request must never lead to repeated actions.
         endpoint = self.endpoint
         read_timeout = self.api.get("timeout_seconds", 120)

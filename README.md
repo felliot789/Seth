@@ -25,6 +25,7 @@ Python dependencies and keyboard permissions below are configured.
 | Shortcut | Action |
 | --- | --- |
 | **Ctrl+D+F** | Capture and answer the current question once |
+| **Ctrl+Shift+G** | Interrupt the current run and return to idle |
 | **Ctrl+E+R** | Cycle API → Gemini → Qwen → API |
 | **Ctrl+Shift+E+R** | Toggle Single ↔ Scroll capture |
 | **Ctrl+Shift+D+F** | Cycle Hidden → Dot-only → Full → Hidden |
@@ -278,7 +279,7 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
-The latest complete run on this host (2026-10-17) passed **229 tests** with all
+The latest complete run on this host (2026-10-18) passed **290 tests** with all
 three integration flags enabled. Local browser fixtures verified combined-image
 uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
 context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
@@ -294,6 +295,11 @@ overlap deduplication, independent panels, verified tiny panel nudges, restored-
 checks, and stopping after an unconfirmed click. Live Qwen cycles selected all three categorization
 rows across two views and two graph-MCMA options across two other views; every
 selection was visually confirmed. Both plans reported 90% confidence.
+The latest regressions also cover persistent native radio/checkbox focus
+rectangles, all ten controls on alternating table rows, and full table/MCMA
+execution with real glyphs and fake VM input. Scrollbar-free whole-page fixtures
+cover wheel capture and first/last answer return trips. A live wheel step and
+its inverse restored the exact question pixels with no answer clicks.
 
 ## Running Seth
 
@@ -334,11 +340,17 @@ Omit `--execute` to test inference without selecting answers.
 Provider and capture selection are independent and persist between questions.
 Ctrl+Shift+E+R enables scroll capture only when needed; toggle back for a question
 that fits in one screenshot. Ctrl+E+R changes the provider without capturing,
-uploading, or selecting anything. All five shortcuts fire on release.
+uploading, or selecting anything. All six shortcuts fire on release.
+
+Ctrl+Shift+G cancels the current capture, scrolling, inference, or remaining
+selections. The indicator briefly shows Cancelling while the current operation
+finishes cleanup, then Idle. The listener stays running with the same provider
+and capture mode; use Ctrl+D+F for a fresh run. Any selections already applied
+remain on the page. Late responses from an interrupted run cannot select answers.
 
 The Linux shortcut uses [python-evdev](https://python-evdev.readthedocs.io/en/stable/usage.html)
 and works independently of desktop focus, including on Wayland. It consumes the
-D/F, E/R, and the shifted Q/W chords so they do not activate the guest's individual shortcuts.
+D/F, E/R, shifted Q/W, and Ctrl+Shift+G so they do not activate the guest's individual shortcuts.
 Incomplete chords pass through when released. Ctrl+P and Ctrl+O pass through normally.
 Release all keys before starting.
 Stop with Ctrl+C; the keyboard grab and virtual keyboard are released on exit.
@@ -521,34 +533,88 @@ otherwise the cycle stops without retrying the click. Confirmed clicks include
 `selection_verified: true` in the result. This verifies selection, not correctness.
 Before confirming a grounded selection, Seth moves the guest pointer without
 pressing any button to the left screen margin. This clears row hover shading
-before the strict visual check. Scroll capture uses the same pointer position
+before the visual check. A native control's persistent focus rectangle may remain;
+Seth allows a bounded six-pixel focus margin only while the filled interior,
+control outline, and surrounding context still confirm selection. Control detection
+uses each candidate's local background so alternating table rows retain their IDs.
+Up to 64 controls can receive badges; an answer plan can select at most ten.
+Scroll capture uses the same pointer position
 for its final baseline. A failed confirmation still stops the plan without a
 second click. Partial-plan errors retain the inferred decision and confidence.
 Explicit custom Qwen coordinate prompts instead use a conservative local check
 within 24 pixels of each predicted point; missing or ambiguous controls stop input.
 
-For long questions in this Windows quiz layout, **Ctrl+Shift+E+R** selects Scroll
+For long questions, **Ctrl+Shift+E+R** selects Scroll
 capture for API, Gemini, or Qwen. In nonmanual runs,
-`capture.scroll_context.enabled` enables the same collection. Seth collects
-overlapping sections from native inner-panel scrollbars before inference.
-`regions` specifies normalized rectangles for the question columns;
-`identity_box` covers the question header, excluding the changing timer.
-Capture finishes with each column at its bottom. All captured sections and the
-final screen share one private PNG upload. Supported answer controls receive
+`capture.scroll_context.enabled` enables the same collection. The supplied
+configuration uses `capture.scroll_context.layout: "auto"`. On each trigger,
+Seth detects native scrollbars throughout the guest screenshot. In wheel mode,
+the pointer is parked before taking the layout baseline. An unambiguous
+whole-page column with a native outer rail, full-width header
+divider and matching card borders is recognized locally, avoiding a layout
+request. Other layouts use a separate inspection by the selected provider. That request
+identifies the question and answer viewports, associates them with numbered
+scrollbars, and locates stationary identity content and changing timer digits.
+It supports one whole-page scroller, independent question/answer panels in
+either order, and fixed content beside a scrolling panel. No region coordinates
+are needed in automatic mode.
+
+The host validates the layout and confidence and checks that the captured content
+is still current. With `capture.scroll_context.scroll_method: "wheel"`, a single
+long question page uses button-free guest mouse-wheel events. This is the scroll
+effect of a two-finger gesture; no touchpad device or draggable scrollbar is
+required. The model marks a single `both` viewport as `scrollable: true`, even
+when no native scrollbar can be identified. Two stable wheel probes establish
+each endpoint, and screenshot alignment measures actual movement between
+overlapping sections. Return trips replay wheel ticks from the verified top
+and must match the recorded content before a target is clicked.
+
+Independent panels keep their native scrollbar ownership probes and drag/return
+path. Set `scroll_method: "drag"` to retain that path for whole pages too. The
+supplied configuration uses wheel for whole pages. Collection finishes with each
+scrolling area at its bottom. Stationary URL/question anchors and the captured content
+protect identity even when the question heading itself scrolls. Only bounded,
+explicit timer/caret exclusions may change; answer controls cannot be excluded.
+Timer widgets are matched visually in each view, including when they move with
+the page and then stick to its top. Fixed overlays are excluded from scroll
+alignment while the question and answer content remains checked.
+Before the first answer selection, Seth revisits a recorded section of each
+scrolling question area to recheck content that may now be off-screen.
+The captured question uses one private PNG upload. For whole-page wheel capture
+without fixed overlays, verified overlaps are removed to reconstruct one
+continuous page at its original resolution. Diagrams remain intact and each
+answer receives one badge. Other layouts retain the overlapping sections and
+final screen. Supported answer controls receive
 stable numbered IDs across the sections: overlapping copies of one control
 have the same ID. One inference request can select graph-based MCMA options or
 categorize table rows spread across different scroll positions. The current
-configuration bounds collection to twelve
-views total across the columns, preserving at least 35% overlap. A question that
-needs more stops before scrolling or inference, with **Scroll limit** in Full
-status and the required/allowed counts in the log. The combined image also keeps
-its 8192-pixel height and 16-megapixel limits.
+configuration bounds collection to 32
+views total across the areas, preserving at least 35% overlap. A question that
+needs more stops before answer inference, with **Scroll limit** in Full status
+and the required/allowed counts in the log. Native thumbs allow a limit check
+before scrolling; the wheel path discovers the required count while collecting.
+The combined image keeps its 8192-pixel height and 16-megapixel limits; duplicate
+wheel overlap no longer consumes that image budget. Original captures and their
+control positions remain available for verified return trips before clicking.
 
-For this configured quiz layout, keep the question header visible and the outer
-page position fixed. Scroll mode operates the question's inner columns; moving
-the outer page or changing zoom can move those columns outside the configured
-regions. Restore the layout before starting another cycle, and keep the VM page
-still while inference and selection run.
+Automatic mode adds a layout request when local whole-page recognition cannot
+establish the viewport. Recognized pages start wheel capture directly; both
+paths make the existing answer request after complete capture.
+See [automatic layout validation](docs/scroll-layout-validation.md) for test
+coverage and the scope of the live checks.
+Layout discovery uses the selected provider and never switches providers on
+uncertainty. Whole-page wheel capture does not require a recognized scrollbar.
+Independent panels still require native scrollbars and recognizable arrow
+buttons. Uncertain ownership, insufficient visual overlap, and nested scrolling
+containers that move one another produce errors instead of an incomplete capture.
+Keep the VM page still while discovery, inference and selection run.
+Keep the answer controls large enough for the local detector; reducing browser
+zoom to squeeze the whole page into one frame can make controls undetectable.
+
+For an explicitly configured layout, set `layout: "manual"` and provide normalized
+`regions` rectangles and an `identity_box` covering a stationary question header,
+excluding the timer. Existing configurations with `regions` and no `layout` keep
+that manual behavior. The supplied configuration removes those fixed regions.
 
 All three providers use numbered control IDs when receiving scroll context.
 After validating the complete answer plan and confidence, Seth groups targets
@@ -561,16 +627,17 @@ counts. The existing Scroll toggle enables this behavior; no additional hotkey
 or model request is needed for the return trips. API/Gemini Single capture retains
 its coordinate behavior.
 
-Between clicks, each native panel can also account for a vertical nudge of at
-most three pixels. This requires unchanged VM/question identity, matching native
-scrollbar geometry and position, and an exact foreground match after alignment.
+Between clicks, each panel can also account for a vertical nudge of at
+most three pixels. This requires unchanged VM/question identity and an exact
+foreground match after alignment. Native panels also require matching scrollbar
+geometry and position.
 Previously selected controls remain verified. The same check runs during click
 confirmation, so a tiny movement in either the question or answer panel does not
 cause a false stop. Larger movements, changed content, and ambiguous matches stop
 the cycle without retrying a click.
 
-The collector requires a recognizable native gray scrollbar thumb and matching
-arrow buttons within the configured columns. It checks the question header and
+The native drag collector requires a recognizable gray scrollbar thumb and matching
+arrow buttons within the configured columns. Both collectors check the question header and
 VM identity throughout capture, and the visible question/answer pixels before
 each selection, allowing changes around earlier confirmed controls. A changed
 view, uncertain scrollbar, failed endpoint, or excess capture count stops input.
@@ -579,8 +646,8 @@ the cycle rather than assigning guessed control identities. Two categories for
 the same physical table row and repeated selections of one control are rejected.
 Navigation failures show **Scroll stopped**, or **Stopped (n)** after input, with
 the reason in the listener log. A previously confirmed visible answer is checked
-again after returning to a view. Scrolling and clicks are never retried
-automatically, and Seth never presses Next or Submit.
+again after returning to a view. Failed input is never retried automatically,
+and Seth never presses Next or Submit.
 
 A table or multiple-answer plan must identify its type and provide unique row
 numbers or option labels. Every point is validated before the first click, and

@@ -68,7 +68,7 @@ class VirtualBoxBackend:
                 input=json.dumps(request), capture_output=True, text=True, timeout=30, env=helper_env,
             )
         except subprocess.TimeoutExpired:
-            message = "VirtualBox input timed out; completion is unknown." if operation in ("click", "drag", "move") else "VirtualBox SDK request timed out."
+            message = "VirtualBox input timed out; completion is unknown." if operation in ("click", "drag", "move", "wheel") else "VirtualBox SDK request timed out."
             raise VMError(message) from None
         except OSError:
             raise VMError("Cannot start the VirtualBox SDK helper; check vm.sdk_python.") from None
@@ -101,6 +101,10 @@ class VirtualBoxBackend:
         # guest pixels, never a host cursor operation or an extra answer click.
         return self._input("move", frame, max_age, stop_event,
                            x=min(8, frame.display.width - 1), y=frame.display.height // 2)
+
+    def wheel(self, frame, x, y, ticks, max_age, stop_event=None):
+        """Button-free guest wheel input; positive ticks scroll downward."""
+        return self._input("wheel", frame, max_age, stop_event, x=x, y=y, ticks=ticks)
 
     def _input(self, operation, frame, max_age, stop_event, **coordinates):
         def send(**extra):
@@ -156,7 +160,7 @@ def sdk_operation(request, manager_factory=None):
     locked = False
     try:
         operation = request["operation"]
-        if operation not in ("status", "capture", "click", "drag", "move"):
+        if operation not in ("status", "capture", "click", "drag", "move", "wheel"):
             raise VMError("Unsupported VirtualBox operation.")
         manager = manager_factory(None, None)
         try:
@@ -209,6 +213,10 @@ def sdk_operation(request, manager_factory=None):
             if (type(end_x) is not int or type(end_y) is not int
                     or not (0 <= end_x < display.width and 0 <= end_y < display.height)):
                 raise VMError("Drag endpoint lies outside the captured guest display.")
+        if operation == "wheel":
+            ticks = request.get("ticks")
+            if type(ticks) is not int or not 1 <= abs(ticks) <= 32:
+                raise VMError("Wheel input must contain one to 32 signed ticks.")
         check_target()
         # The SDK takes guest desktop pixels starting at (1, 1), not host pixels.
         guest_x, guest_y = display.x_origin + x + 1, display.y_origin + y + 1
@@ -217,6 +225,12 @@ def sdk_operation(request, manager_factory=None):
         check_target()
         if operation == "move":
             return {"pointer_x": x, "pointer_y": y, "vm_uuid": display.vm_uuid, "screen": screen}
+        if operation == "wheel":
+            for _ in range(abs(ticks)):
+                check_target()
+                mouse.putMouseEventAbsolute(guest_x, guest_y, 1 if ticks > 0 else -1, 0, 0)
+                time.sleep(.04)
+            return {"wheel_ticks": ticks, "vm_uuid": display.vm_uuid, "screen": screen}
         if operation == "drag":
             last_x, last_y = guest_x, guest_y
             try:
@@ -243,7 +257,7 @@ def sdk_operation(request, manager_factory=None):
     except VMError:
         raise
     except Exception:
-        if request.get("operation") in ("click", "drag", "move"):
+        if request.get("operation") in ("click", "drag", "move", "wheel"):
             raise VMError("VirtualBox SDK input failed; completion may be unknown. Check the VM and host SDK.") from None
         raise VMError("VirtualBox SDK capture/status failed; check the VM display and host SDK.") from None
     finally:

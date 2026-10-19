@@ -619,7 +619,10 @@ class WebInferenceClient(DecisionClient):
         state = self._run(provider, deadline, lambda adapter, page: adapter.prepare(page))
         return {"status": "ready", "provider": provider, "engine": self.engine(provider), "model": state["model"]}
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
+    def inspect_layout(self, image_path, prompt):
+        return self.analyze_screenshot(image_path, prompt, _layout=True)
+
+    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None, _layout=False):
         self.validate_config()
         if context_images and prompt:
             raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
@@ -644,7 +647,7 @@ class WebInferenceClient(DecisionClient):
             self._report(f"Opening {provider}")
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
-                labeled = not prompt and (provider == "qwen" or bool(context_images))
+                labeled = not prompt and (provider == "qwen" or bool(context_images) or scroll_targets is not None)
                 with annotated_controls(image_path, context_images=context_images,
                                         regions=control_regions if context_images else None,
                                         scroll_targets=scroll_targets) if labeled else nullcontext((image_path, None)) as (upload, controls):
@@ -653,6 +656,10 @@ class WebInferenceClient(DecisionClient):
                                                 else self.adapter(provider).build_prompt(width, height))
                     raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
                         page, upload, request_prompt, self._report))
+                    if _layout:
+                        self.last_provider = provider
+                        LOG.info('Layout inspection completed using %s', provider)
+                        return raw
                     decision = self.parse_coordinates(raw, width, height, control_targets=controls)
                 if decision is not None and (labeled or provider == "qwen"):
                     raw = json.dumps(decision if labeled else ground_decision(image_path, decision))

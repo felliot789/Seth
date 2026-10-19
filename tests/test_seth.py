@@ -236,7 +236,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(events, ["before", "click", "after"])
         self.assertEqual(result["status"], "clicked")
         self.assertTrue(result["click"]["selection_verified"])
-        confirm.assert_called_once_with(self.frame, DECISION, self.engine.stop_event)
+        confirm.assert_called_once_with(self.frame, DECISION, self.engine.cancel_event)
 
     def test_qwen_missed_click_is_an_error_and_is_never_retried(self):
         self.engine.ai.last_provider = "qwen"
@@ -256,7 +256,7 @@ class CycleTests(unittest.TestCase):
             result = self.engine.run_cycle()
         self.assertEqual(result["status"], "clicked")
         self.analyze.assert_called_once_with(self.frame.path, context_images=bundle.contexts, control_regions=bundle.regions)
-        bundle.verify_identity.assert_called_once_with(self.engine.capture, self.engine.stop_event)
+        bundle.verify_identity.assert_called_once_with(self.engine.capture, self.engine.cancel_event)
         self.assertEqual(result["context_sections"], 1)
         self.assertEqual(result["capture_path"], str(self.frame.path))
 

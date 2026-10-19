@@ -13,16 +13,23 @@ import tempfile
 from PIL import Image, ImageDraw, ImageFont
 
 from inference import AIError
+from scroll_limits import MAX_SCROLL_VIEWS, MAX_SHEET_HEIGHT, MAX_SHEET_PIXELS
 
 
 SEARCH_RADIUS = 24
 MAX_DIAMETER = 34
 CONTRAST = 18
+# Native browser focus decoration can extend six pixels beyond a control.
+# Keep the surrounding context outside that bounded halo checked as well.
+CONTROL_HALO = 6
+CONTROL_CONTEXT = CONTROL_HALO + 4
 
 
-def _background(image):
+def _background(image, *, exclude=None):
     histogram = image.histogram()
-    halfway = image.width * image.height / 2
+    if exclude is not None:
+        histogram = [count - inner for count, inner in zip(histogram, image.crop(exclude).histogram())]
+    halfway = sum(histogram) / 2
     total = 0
     for value, count in enumerate(histogram):
         total += count
@@ -88,6 +95,42 @@ def _outline(component, box, kind):
     return len(corners) == 4 and all(edges)
 
 
+def _control_shapes(gray, component, background):
+    xs, ys = zip(*component)
+    box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    width, height = box[2] - box[0], box[3] - box[1]
+    if (box[0] == 0 or box[1] == 0 or box[2] == gray.width or box[3] == gray.height
+            or not 12 <= min(width, height) <= max(width, height) <= MAX_DIAMETER
+            or abs(width - height) > 2):
+        return
+    # Alternating table rows can differ subtly from the frame's dominant
+    # background. Refine each candidate against its own local background,
+    # keeping the same outline and unchecked-interior requirements.
+    context = (max(0, box[0] - 3), max(0, box[1] - 3), min(gray.width, box[2] + 3), min(gray.height, box[3] + 3))
+    # Use only surrounding pixels: a large filled control must not become its
+    # own "background" and be mistaken for an unchecked outline.
+    local_background = _background(gray.crop(context), exclude=(box[0] - context[0], box[1] - context[1],
+                                                               box[2] - context[0], box[3] - context[1]))
+    candidates = [component] if local_background == background else _components({
+        (x, y) for y in range(box[1], box[3]) for x in range(box[0], box[2])
+        if abs(gray.getpixel((x, y)) - local_background) >= CONTRAST})
+    for candidate in candidates:
+        xs, ys = zip(*candidate)
+        yield candidate, (min(xs), min(ys), max(xs) + 1, max(ys) + 1), local_background
+
+
+def _separated_outline(gray, box, background):
+    """Unchecked controls need a clear gap, unlike round letters inside words."""
+    left, top, right, bottom = box
+    nearby = [abs(gray.getpixel((x, y)) - background)
+              for y in range(max(0, top - 2), min(gray.height, bottom + 2))
+              for x in range(max(0, left - 2), min(gray.width, right + 2))
+              if not (left <= x < right and top <= y < bottom)
+              and abs(gray.getpixel((x, y)) - background) >= CONTRAST]
+    # Native antialiasing can leave a couple of faint disconnected pixels.
+    return len(nearby) <= 2 and all(value < CONTRAST * 2 for value in nearby)
+
+
 def locate_control(image, x, y, kind):
     """Find exactly one nearby, unchecked supported control or fail closed."""
     margin = SEARCH_RADIUS + MAX_DIAMETER // 2 + 3
@@ -98,16 +141,15 @@ def locate_control(image, x, y, kind):
             if abs(crop.getpixel((px, py)) - background) >= CONTRAST}
     candidates = []
     for component in _components(mask):
-        xs, ys = zip(*component)
-        box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
-        if box[0] == 0 or box[1] == 0 or box[2] == crop.width or box[3] == crop.height:
-            continue
-        cx, cy = (box[0] + box[2] - 1) / 2 + left, (box[1] + box[3] - 1) / 2 + top
-        if math.hypot(cx - x, cy - y) > SEARCH_RADIUS or not _outline(component, box, kind):
-            continue
-        interior = list(_interior(box, kind))
-        filled = sum(point in mask for point in interior) / len(interior)
-        candidates.append((box, cx, cy, filled))
+        for candidate, box, local_background in _control_shapes(crop, component, background):
+            cx, cy = (box[0] + box[2] - 1) / 2 + left, (box[1] + box[3] - 1) / 2 + top
+            if math.hypot(cx - x, cy - y) > SEARCH_RADIUS or not _outline(candidate, box, kind):
+                continue
+            interior = list(_interior(box, kind))
+            filled = sum(abs(crop.getpixel(point) - local_background) >= CONTRAST for point in interior) / len(interior)
+            if filled <= .03 and not _separated_outline(crop, box, local_background):
+                continue
+            candidates.append((box, cx, cy, filled))
     containing = []
     for candidate in candidates:
         box, cx, cy, _ = candidate
@@ -176,19 +218,17 @@ def catalog_controls(image):
     background = _background(gray)
     controls = []
     for component in _small_components(gray, background):
-        xs, ys = zip(*component)
-        box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
-        if (box[0] == 0 or box[1] == 0 or box[2] == image.width or box[3] == image.height
-                or max(box[2] - box[0], box[3] - box[1]) > MAX_DIAMETER):
-            continue
-        for kind in ("radio", "checkbox"):
-            if not _outline(component, box, kind):
-                continue
-            interior = list(_interior(box, kind))
-            if sum(abs(gray.getpixel(p) - background) >= CONTRAST for p in interior) > .03 * len(interior):
-                continue
-            controls.append({"kind": kind, "box": list(box)})
-            break
+        for candidate, box, local_background in _control_shapes(gray, component, background):
+            for kind in ("radio", "checkbox"):
+                if not _outline(candidate, box, kind):
+                    continue
+                interior = list(_interior(box, kind))
+                if sum(abs(gray.getpixel(p) - local_background) >= CONTRAST for p in interior) > .03 * len(interior):
+                    continue
+                if not _separated_outline(gray, box, local_background):
+                    continue
+                controls.append({"kind": kind, "box": list(box)})
+                break
     if len(controls) > 64:
         raise AIError("Too many candidate controls to label unambiguously; no input sent.", "browser_grounding")
     controls.sort(key=lambda c: (c["box"][1] + c["box"][3], c["box"][0] + c["box"][2]))
@@ -212,8 +252,8 @@ def _badge_controls(image, controls):
 
 
 def _context_sheet(answer, contexts):
-    if not isinstance(contexts, list) or not 1 <= len(contexts) <= 12:
-        raise AIError("Scroll context must contain one to twelve reference sections.", "browser_grounding")
+    if not isinstance(contexts, list) or not 1 <= len(contexts) <= MAX_SCROLL_VIEWS:
+        raise AIError(f"Scroll context must contain one to {MAX_SCROLL_VIEWS} reference sections.", "browser_grounding")
     tiles = []
     for context in contexts:
         box = context.get("box")
@@ -237,7 +277,7 @@ def _context_sheet(answer, contexts):
         row_height = max(row_height, tile.height + 36)
     answer_y = y + row_height + 48
     height = answer_y + answer.height
-    if height > 8192 or height * answer.width > 16_000_000:
+    if height > MAX_SHEET_HEIGHT or height * answer.width > MAX_SHEET_PIXELS:
         raise AIError("Scroll context image exceeds its bounded size; no inference sent.", "browser_grounding")
     result = Image.new("RGB", (answer.width, height), "#e2e8f0")
     draw = ImageDraw.Draw(result)
@@ -255,6 +295,50 @@ def _context_sheet(answer, contexts):
     return result
 
 
+def _document_sheet(answer, document):
+    """Remove verified overlap without scaling or cutting diagrams into tiles."""
+    sections = document['sections']
+    if not isinstance(sections, list) or not 2 <= len(sections) <= MAX_SCROLL_VIEWS:
+        raise AIError('Invalid complete-question section count.', 'browser_grounding')
+    box = sections[0]['box']
+    if (not isinstance(box, (tuple, list)) or len(box) != 4 or any(type(v) is not int for v in box)
+            or not 0 <= box[0] < box[2] <= answer.width or not 0 <= box[1] < box[3] <= answer.height):
+        raise AIError('Invalid complete-question crop.', 'browser_grounding')
+    width, viewport_height = box[2] - box[0], box[3] - box[1]
+    previous = None
+    for section in sections:
+        offset = section['offset']
+        if (tuple(section['box']) != tuple(box) or type(offset) is not int
+                or (previous is None and offset != 0)
+                or (previous is not None and not 0 < offset - previous <= viewport_height * .65)):
+            raise AIError('Complete-question sections lack verified continuous overlap.', 'browser_grounding')
+        previous = offset
+    height = previous + viewport_height
+    if height + 36 > MAX_SHEET_HEIGHT or (height + 36) * width > MAX_SHEET_PIXELS:
+        raise AIError('Complete question image exceeds its bounded size; no inference sent.', 'browser_grounding')
+    result = Image.new('RGB', (width, height + 36), '#e2e8f0')
+    covered = 0
+    for section in sections:
+        with Image.open(section['path']) as source:
+            if source.format not in ('PNG', 'JPEG') or source.size != answer.size:
+                raise AIError('Complete-question frames must match the VM dimensions.', 'browser_grounding')
+            # Only append new rows. The complete diagram remains contiguous,
+            # including any radio originally clipped at a viewport boundary.
+            start = covered - section['offset']
+            strip = source.convert('RGB').crop((box[0], box[1] + start, box[2], box[3]))
+            result.paste(strip, (0, covered + 36))
+            covered = section['offset'] + viewport_height
+    controls = {}
+    for identifier, control in document['controls'].items():
+        left, top, right, bottom = control['box']
+        if not 0 <= left < right <= width or not 0 <= top < bottom <= height:
+            raise AIError('Answer badge lies outside the complete question.', 'browser_grounding')
+        controls[identifier] = control | {'box': [left, top + 36, right, bottom + 36]}
+    _badge_controls(result, controls)
+    ImageDraw.Draw(result).text((8, 8), 'COMPLETE QUESTION - read top to bottom; choose yellow badge IDs', fill='#0f172a')
+    return result
+
+
 @contextmanager
 def annotated_controls(image_path, *, context_images=None, regions=None, scroll_targets=None):
     """Upload-only annotated copy; the original VM frame stays unchanged."""
@@ -268,13 +352,29 @@ def annotated_controls(image_path, *, context_images=None, regions=None, scroll_
                 and region[1] <= control["box"][1] < control["box"][3] <= region[3]
                 for region in regions)), 1)}
     _badge_controls(image, controls if scroll_targets is None else scroll_targets['live_controls'])
-    if context_images:
+    if scroll_targets is not None and scroll_targets.get('document'):
+        image = _document_sheet(image, scroll_targets['document'])
+    elif context_images:
         image = _context_sheet(image, context_images)
     with tempfile.TemporaryDirectory(prefix="seth-controls-") as directory:
         path = Path(directory) / (Path(image_path).stem + "-controls.png")
         image.save(path)
         path.chmod(0o600)
         yield path, controls
+
+
+def _surroundings_unchanged(before, after, box):
+    def matches(inner, outer):
+        points = [(x, y) for y in range(max(0, box[1] - outer), min(before.height, box[3] + outer))
+                  for x in range(max(0, box[0] - outer), min(before.width, box[2] + outer))
+                  if not (box[0] - inner <= x < box[2] + inner and box[1] - inner <= y < box[3] + inner)]
+        return bool(points) and sum(abs(after.getpixel(p) - before.getpixel(p)) >= CONTRAST
+                                    for p in points) <= .5 * len(points)
+
+    # Preserve the close-background check for controls without focus decoration.
+    # A persistent focus rectangle is allowed only with unchanged context beyond
+    # its bounded halo; broad hover shading or page changes still fail.
+    return matches(0, 4) or matches(CONTROL_HALO, CONTROL_CONTEXT)
 
 
 def selection_visible(before, after, control):
@@ -287,10 +387,7 @@ def selection_visible(before, after, control):
     changed = sum(abs(fresh.getpixel(point) - original.getpixel(point)) >= CONTRAST for point in interior)
     if filled < .2 * len(interior) or changed < .2 * len(interior):
         return False
-    outside = [(x, y) for y in range(max(0, box[1] - 4), min(original.height, box[3] + 4))
-               for x in range(max(0, box[0] - 4), min(original.width, box[2] + 4))
-               if not (box[0] <= x < box[2] and box[1] <= y < box[3])]
-    if not outside or sum(abs(fresh.getpixel(p) - original.getpixel(p)) >= CONTRAST for p in outside) > .5 * len(outside):
+    if not _surroundings_unchanged(original, fresh, box):
         return False
     # A modal, navigation, or large filled patch is not evidence of selection.
     crop = fresh.crop(tuple(box))

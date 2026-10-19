@@ -1,4 +1,4 @@
-# Qwen web validation — updated 2026-10-17
+# Qwen web validation — updated 2026-10-18
 
 The configured Qwen model is Qwen3.8-Omni-Flash with Thinking, using the installed
 Chromium and a private native profile. The hotkey listener now starts with API
@@ -429,6 +429,42 @@ decision and confirmation flags are saved privately in
 All 229 tests passed in 245.027 seconds with Lightpanda, Chromium, and native
 login integration suites enabled. The full report is saved privately at
 `captures/panel-drift-full-regression.log`.
+
+## Native radio focus and missing tenth badge — 2026-10-18
+
+The recurring single-view table failure had a complete five-selection Qwen plan
+at confidence 0.95. The first click selected the radio, but a blue focus rectangle
+persisted after pointer parking. The old confirmation check rejected its changed
+surroundings and stopped the remaining four selections. A preceding single-choice
+cycle showed the same native radio decoration. A subsequent three-checkbox MCMA
+plan in the still-running old listener stopped on the same persistent focus
+rectangle, despite selecting its first checkbox. This differs from the earlier
+hover-shading and panel-nudge failures.
+
+Confirmation now accepts focus decoration within six pixels of the original
+control while retaining the filled-interior, preserved-outline and surrounding
+context checks. Focus alone still fails. Scroll comparisons use the same margin
+and retain it when a focused glyph reaches the viewport edge.
+
+The user's tenth missing badge was a separate detector failure in the same
+capture. Its light gray row differed from the whole frame's white background;
+that small difference changed which antialiased outline pixels passed the contrast
+threshold. Per-candidate local background refinement restores all ten controls
+without lowering the outline checks. Cataloging and fresh-control grounding share
+that refinement. There is no nine-target cap: cataloging allows 64 controls and
+a decision allows ten selections.
+
+All three saved failed capture pairs now confirm correctly without VM input, and the
+actual table capture yields all ten controls. Anonymous glyphs cover both native
+focus variants, all ten radio buttons in light/dark images, a five-row engine
+replay and a three-checkbox MCMA replay with focus moving between clicks,
+stopping on a genuinely missed click, and nine selections through scroll returns. These replays use fake input and do
+not establish a fresh successful live answer cycle.
+
+All 280 tests passed in 273.713 seconds with the three browser integration flags
+enabled. After retaining the latest MCMA glyph and expanding the engine replay,
+all 22 control tests passed. The listener was then restarted; provider/capture
+selection resets to API / Single, while the managed browser remains open.
 
 ## Local regression coverage
 
