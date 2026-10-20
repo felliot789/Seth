@@ -419,7 +419,7 @@ class SelectionCaptureTests(unittest.TestCase):
                             else {"option": str(row + 1)}) | {"target_id": f"{row + 1:02d}"}
                            for row in range(count)]}
 
-                def infer(path):
+                def infer(path, **kwargs):
                     with Image.open(path) as image:
                         controls = catalog_controls(image)
                     return json.dumps(DecisionClient().parse_coordinates(json.dumps(raw), 300, 450,
@@ -440,7 +440,7 @@ class SelectionCaptureTests(unittest.TestCase):
                     self.assertEqual(result["clicks_completed"], 3)
                     self.assertTrue(all(click["selection_verified"] for click in result["clicks"][:2]))
                     self.assertNotIn("selection_verified", result["clicks"][2])
-                self.assertEqual(backend.park_pointer.call_count, len(clicked_rows))
+                self.assertGreaterEqual(backend.park_pointer.call_count, len(clicked_rows))
 
 
 if __name__ == "__main__":

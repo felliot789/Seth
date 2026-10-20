@@ -623,8 +623,9 @@ class WebInferenceClient(DecisionClient):
         return self.analyze_screenshot(image_path, prompt, _layout=True)
 
     def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None, _layout=False):
+        self.last_grounded = False
         self.validate_config()
-        if context_images and prompt:
+        if (context_images or scroll_targets is not None) and prompt:
             raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
         image_path = Path(image_path).resolve()
         width, height = screenshot_size(image_path)
@@ -647,9 +648,9 @@ class WebInferenceClient(DecisionClient):
             self._report(f"Opening {provider}")
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
-                labeled = not prompt and (provider == "qwen" or bool(context_images) or scroll_targets is not None)
+                labeled = prompt is None and not _layout
                 with annotated_controls(image_path, context_images=context_images,
-                                        regions=control_regions if context_images else None,
+                                        regions=control_regions,
                                         scroll_targets=scroll_targets) if labeled else nullcontext((image_path, None)) as (upload, controls):
                     request_prompt = prompt or (build_control_prompt(width, height, controls, scroll_context=bool(context_images),
                                                                     scroll_navigation=scroll_targets is not None) if labeled

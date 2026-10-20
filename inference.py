@@ -167,6 +167,11 @@ class DecisionClient:
             raise AIError("Decision must be a JSON object; refusing to guess coordinates.") from None
         if not isinstance(result, dict) or result.get("action") not in ("click", "select", "none"):
             raise AIError("Decision must specify action 'click', 'select', or 'none'.")
+        if result["action"] == "click" and any(key in result for key in ("selection_type", "selections")):
+            raise AIError("Click decisions cannot contain selection plan fields.")
+        if result["action"] == "select" and any(key in result for key in (
+                "target_id", "click_x", "click_y", "target_control", "target_view", "model_point")):
+            raise AIError("Selection plans cannot contain a top-level click target.")
         if result["action"] == "none":
             explanation = result.get("explanation")
             if isinstance(explanation, str):

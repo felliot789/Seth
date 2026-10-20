@@ -217,6 +217,15 @@ class CycleTests(unittest.TestCase):
         guard = patch.object(self.engine.capture, "verify_target")
         self.verify = guard.start()
         self.addCleanup(guard.stop)
+        # Lifecycle tests isolate execution I/O. Actual control/content safety
+        # is exercised by SingleCaptureTests and the helper integration suite.
+        single = Mock(frame=self.frame, regions=None)
+        single.verify.return_value = self.frame
+        for guard in (patch('main.prepare_single', return_value=single),
+                      patch('main.ground_decision', side_effect=lambda path, decision, **kwargs: decision),
+                      patch.object(self.engine.capture, 'verify_selection')):
+            guard.start()
+            self.addCleanup(guard.stop)
 
     def test_exactly_one_click_then_return(self):
         self.assertEqual(self.engine.run_cycle()["status"], "clicked")
@@ -288,7 +297,7 @@ class CycleTests(unittest.TestCase):
         def capture():
             observed.append(self.engine.progress[0])
             return self.frame
-        def analyze(*args):
+        def analyze(*args, **kwargs):
             observed.append(self.engine.progress[0])
             return json.dumps(DECISION)
         def click(*args):
@@ -413,7 +422,7 @@ class CycleTests(unittest.TestCase):
                 operation.side_effect = None
 
     def test_cancel_during_inference(self):
-        def cancel(*args):
+        def cancel(*args, **kwargs):
             self.engine.stop_event.set()
             return json.dumps(DECISION)
         self.analyze.side_effect = cancel
@@ -422,7 +431,7 @@ class CycleTests(unittest.TestCase):
 
     def test_concurrent_requests_are_dropped(self):
         started, release = threading.Event(), threading.Event()
-        def blocked(*args):
+        def blocked(*args, **kwargs):
             started.set()
             release.wait(3)
             return json.dumps(DECISION)
@@ -601,7 +610,7 @@ class HTTPTests(unittest.TestCase):
                     original=path.read_bytes()
                     config=configuration(root);config['api'].update(base_url=api.url,stream=streaming)
                     client=SethAIClient(config)
-                    self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path),320,200),DECISION)
+                    self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path, prompt="Return the answer in original pixel coordinates."),320,200),DECISION)
                     self.assertEqual(len(api.requests),1)
                     url=api.requests[0][2]['messages'][0]['content'][1]['image_url']['url']
                     self.assertTrue(url.startswith('data:'+mime+';base64,'))
@@ -615,7 +624,7 @@ class HTTPTests(unittest.TestCase):
                 Image.new('RGB',(320,200),'white').save(path,format=image_format)
                 with self.subTest(image_format=image_format),patch('ai_client.requests.post') as post, \
                         self.assertRaises(AIError):
-                    SethAIClient(configuration(root)).analyze_screenshot(path)
+                    SethAIClient(configuration(root)).analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
                 post.assert_not_called()
 
     def test_scroll_context_uploads_one_combined_png_and_maps_ids_to_the_live_frame(self):
@@ -674,6 +683,7 @@ class HTTPTests(unittest.TestCase):
                     engine = SethEngine(config, execute=True)
                     frame = Frame(path, GuestDisplay(**TEST_DISPLAY), time.monotonic())
                     with patch.object(engine.capture, "capture_frame", return_value=frame), \
+                            patch.object(engine.capture.backend, "park_pointer"), \
                             patch.object(engine.clicker, "click") as click:
                         result = engine.run_cycle()
                     self.assertEqual(result["status"], "error")
@@ -705,10 +715,10 @@ class HTTPTests(unittest.TestCase):
                     config["api"].update(base_url=api.url, stream=True)
                     client = SethAIClient(config)
                     if valid:
-                        self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path), 320, 200), DECISION)
+                        self.assertEqual(client.parse_coordinates(client.analyze_screenshot(path, prompt="Return the answer in original pixel coordinates."), 320, 200), DECISION)
                     else:
                         with self.assertRaises(AIError):
-                            client.analyze_screenshot(path)
+                            client.analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
                     self.assertEqual(len(api.requests), 1)
                     self.assertIs(api.requests[0][2]["stream"], True)
 
@@ -728,7 +738,7 @@ class HTTPTests(unittest.TestCase):
             response.iter_lines.side_effect = requests.ConnectionError("secret")
             with patch("ai_client.requests.post", return_value=response):
                 with self.assertRaises(AIError) as caught:
-                    SethAIClient(config).analyze_screenshot(path)
+                    SethAIClient(config).analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
             self.assertEqual(caught.exception.code, "stream_error")
             self.assertNotIn("secret", str(caught.exception))
             response.close.assert_called_once()
@@ -748,16 +758,20 @@ class HTTPTests(unittest.TestCase):
                                    (requests.RequestException("secret"), "request failed")):
                 with self.subTest(error=type(error).__name__), patch("ai_client.requests.post", side_effect=error):
                     with self.assertRaisesRegex(AIError, message) as caught:
-                        SethAIClient(configuration(root)).analyze_screenshot(path)
+                        SethAIClient(configuration(root)).analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
                     self.assertNotIn("secret", str(caught.exception))
 
     def test_timeout_is_identified_in_cycle_status(self):
         engine = SethEngine(configuration("/tmp"), execute=True)
-        frame = Frame(Path("dummy.png"), GuestDisplay(**TEST_DISPLAY), time.monotonic())
-        with patch.object(engine.capture, "capture_frame", return_value=frame), \
-                patch.object(engine.ai, "analyze_screenshot", side_effect=AIError("Timed out", "response_timeout")), \
-                patch.object(engine.clicker, "click") as click:
-            result = engine.run_cycle()
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "question.png"
+            Image.new("RGB", (320, 200), "white").save(path)
+            frame = Frame(path, GuestDisplay(**TEST_DISPLAY), time.monotonic())
+            with patch.object(engine.capture, "capture_frame", return_value=frame), \
+                    patch.object(engine.capture.backend, "park_pointer"), \
+                    patch.object(engine.ai, "analyze_screenshot", side_effect=AIError("Timed out", "response_timeout")), \
+                    patch.object(engine.clicker, "click") as click:
+                result = engine.run_cycle()
         self.assertEqual(result["error_code"], "response_timeout")
         self.assertEqual(engine.progress, ("error", "API timeout"))
         click.assert_not_called()
@@ -772,7 +786,7 @@ class HTTPTests(unittest.TestCase):
                     config = configuration(root)
                     config["api"]["base_url"] = api.url
                     with self.assertRaises(AIError):
-                        SethAIClient(config).analyze_screenshot(path)
+                        SethAIClient(config).analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
                     self.assertEqual(len(api.requests), 1)
 
 
@@ -948,17 +962,21 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
                 (root / "vboxapi.py").write_text("from fake_vbox import FakeManager as VirtualBoxManager\n")
                 log = root / "sdk.jsonl"
                 env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
-                       "SETH_TEST_VBOX_LOG": str(log)}
-                normalized = plan | {"coordinate_space": "normalized_1000", "selections": [
-                    point | {"click_x": round(point["click_x"] * 1000 / 320),
-                             "click_y": round(point["click_y"] * 1000 / 200)} for point in plan["selections"]]}
-                with patch.dict(os.environ, env), LocalAPI(decision=normalized) as api:
+                       "SETH_TEST_VBOX_LOG": str(log),
+                       "SETH_TEST_CONTROL_KIND": "checkbox" if plan["selection_type"] == "multiple_answer" else "radio"}
+                labeled = {key: value for key, value in plan.items() if key != "coordinate_space"}
+                labeled["selections"] = [
+                    {key: value for key, value in point.items() if key not in ("click_x", "click_y")} |
+                    {"target_id": f"{(point['click_y'] - 60) // 40 + 1:02d}"}
+                    for point in plan["selections"]]
+                with patch.dict(os.environ, env), LocalAPI(decision=labeled) as api:
                     config = configuration(root)
                     config["api"]["base_url"] = api.url
                     engine = SethEngine(config, execute=True)
                     result = engine.run_cycle()
                     self.assertEqual(result["status"], "clicked", result)
                     self.assertEqual(result["click_count"], len(plan["selections"]))
+                    self.assertTrue(all(point["selection_verified"] for point in result["clicks"]))
                     self.assertEqual(engine.cycle_count, 1)
                     self.assertEqual(len(api.requests), 1)
                     events = [json.loads(line) for line in log.read_text().splitlines()]
@@ -972,8 +990,8 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
             log = root / "sdk.jsonl"
             env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
                    "SETH_TEST_VBOX_LOG": str(log)}
-            normalized = DECISION | {"coordinate_space": "normalized_1000", "click_x": 469, "click_y": 500}
-            with patch.dict(os.environ, env), LocalAPI(decision=normalized) as api:
+            labeled = {key: value for key, value in DECISION.items() if key not in ("coordinate_space", "click_x", "click_y")} | {"target_id": "02"}
+            with patch.dict(os.environ, env), LocalAPI(decision=labeled) as api:
                 config = configuration(root)
                 config["api"]["base_url"] = api.url
                 engine = SethEngine(config, execute=True)
@@ -981,19 +999,27 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
                 self.assertEqual(result["status"], "clicked", result)
                 events = [json.loads(line) for line in log.read_text().splitlines()]
                 mouse = [event["args"] for event in events if event["kind"] == "mouse"]
-                self.assertEqual(mouse, [[151, 101, 0, 0, 0], [151, 101, 0, 0, 1], [151, 101, 0, 0, 0]])
-                self.assertEqual(sum(event["kind"] == "unlock" for event in events), 2)
-                self.assertEqual(sum(event["kind"] == "deinit" for event in events), 2)
+                self.assertEqual([event for event in mouse if event[-1] == 1], [[151, 101, 0, 0, 1]])
+                self.assertTrue(result["click"]["selection_verified"])
+                captures = sum(event["kind"] == "capture" for event in events)
+                self.assertGreater(captures, 2)
+                self.assertEqual(sum(event["kind"] == "unlock" for event in events),
+                                 sum(event["kind"] == "deinit" for event in events))
                 self.assertEqual(len(api.requests), 1)
                 route, auth, payload = api.requests[0]
                 self.assertEqual(route, "/v1/chat/completions")
                 self.assertEqual(auth, "Bearer local-test-key")
                 self.assertIs(payload["stream"], False)
+                self.assertIn('"02": "radio"', payload["messages"][0]["content"][0]["text"])
                 encoded = payload["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
                 with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
                     self.assertEqual(image.size, (320, 200))
-                capture = next((root / "captures").glob("*.png"))
-                self.assertEqual(capture.stat().st_mode & 0o777, 0o600)
+                baseline = min((root / "captures").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
+                self.assertEqual(baseline.stat().st_mode & 0o777, 0o600)
+                with Image.open(baseline) as original, Image.open(io.BytesIO(base64.b64decode(encoded))) as upload:
+                    # Badge upload changes a private copy, preserving raw captures.
+                    self.assertEqual(original.getpixel((150, 100)), (255, 255, 255))
+                    self.assertNotEqual(original.tobytes(), upload.tobytes())
                 self.assertEqual(engine.cycle_count, 1)
                 # A listener worker also uses fresh helpers and remains a dry run.
                 engine.execute = False
@@ -1001,7 +1027,7 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
                 engine.wait()
                 self.assertEqual(len(api.requests), 2)
                 events_after = [json.loads(line) for line in log.read_text().splitlines()]
-                self.assertEqual(sum(event["kind"] == "mouse" for event in events_after), 3)
+                self.assertEqual(sum(event["kind"] == "mouse" and event["args"][-1] == 1 for event in events_after), 1)
 
 
 if __name__ == "__main__":

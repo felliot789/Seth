@@ -12,12 +12,14 @@ import threading
 import time
 
 from inference import AIError, create_client
-from cancellation import CycleCancellation
+from cancellation import CancellationEvent, CycleCancellation
 from capture import SethCapture
 from clicker import SethClicker
+from control_targets import ground_decision
 from hotkey import SethHotkey
 from settings import load_config
 from service_runtime import notify
+from single_capture import prepare_single
 from scroll_capture import ScrolledQuestion, ScrollLimitError, ScrollNavigationError, ScrollLayoutError
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
@@ -37,7 +39,7 @@ class SethEngine:
         self.execute = execute
         self.backend = VirtualBoxBackend(self.config)
         self.capture = SethCapture(self.config, self.backend)
-        self.stop_event = threading.Event()
+        self.stop_event = CancellationEvent()
         self.cancel_event = CycleCancellation(self.stop_event)
         self._state_lock = threading.Lock()
         self._cycle_active = False
@@ -155,6 +157,7 @@ class SethEngine:
         completed_clicks = []
         question = None
         navigation = None
+        single = None
         decision = None
         try:
             if self.cancel_event.is_set():
@@ -164,6 +167,9 @@ class SethEngine:
             self.ai.validate_config()
             frame = self.capture.capture_frame()
             self._check_cancelled()
+            if not (getattr(self.ai, 'supports_scroll_context', False) and self.scroll_enabled):
+                single = prepare_single(self.config, self.capture, frame, self.cancel_event)
+                frame = single.frame
             LOG.info("Captured %s (VM %s, screen %s, %sx%s)", frame.path,
                      frame.display.vm_uuid, frame.display.screen, frame.display.width, frame.display.height)
             if (getattr(self.ai, "supports_scroll_context", False)
@@ -193,7 +199,9 @@ class SethEngine:
                 decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height, scroll_navigation=True)
             else:
                 raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
-                       if question is not None and question.contexts else self.ai.analyze_screenshot(frame.path))
+                       if question is not None and question.contexts else
+                       self.ai.analyze_screenshot(frame.path, control_regions=single.regions) if single is not None else
+                       self.ai.analyze_screenshot(frame.path))
                 self._check_cancelled()
                 decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height)
             plan = navigation.plan(decision) if navigation is not None and decision is not None else None
@@ -213,7 +221,8 @@ class SethEngine:
                 result = {"status": "dry_run", "decision": decision}
             else:
                 self.progress = ("selecting", "Selecting")
-                grounded = getattr(self.ai, "last_grounded", False) or getattr(self.ai, "last_provider", None) == "qwen"
+                if navigation is None:
+                    decision = ground_decision(frame.path, decision, regions=single.regions if single is not None else None)
                 if navigation is not None:
                     for selection in plan:
                         target_frame, target = navigation.prepare(selection)
@@ -233,26 +242,29 @@ class SethEngine:
                             raise VMError("Cycle cancelled; no further selections.")
                         if question is not None and question.contexts:
                             question.verify_identity(self.capture, self.cancel_event)
-                        self.capture.verify_target(frame, selection["click_x"], selection["click_y"])
-                        click = self.clicker.click(frame, selection["click_x"], selection["click_y"], self.cancel_event)
+                        target_frame = single.verify() if single is not None else frame
+                        self.capture.verify_target(target_frame, selection["click_x"], selection["click_y"])
+                        click = self.clicker.click(target_frame, selection["click_x"], selection["click_y"], self.cancel_event)
                         completed_clicks.append(click | {key: selection[key] for key in ("row", "choice", "option") if key in selection})
-                        if grounded:
-                            self.capture.verify_selection(frame, selection, self.cancel_event)
-                            completed_clicks[-1]["selection_verified"] = True
-                            if question is not None and question.contexts:
-                                question.selected_controls.append(selection)
+                        self.capture.verify_selection(target_frame, selection, self.cancel_event)
+                        completed_clicks[-1]["selection_verified"] = True
+                        if question is not None and question.contexts:
+                            question.selected_controls.append(selection)
+                        if single is not None:
+                            single.confirm(selection)
                         self.progress = ("selecting", f"Selected {len(completed_clicks)}/{len(decision['selections'])}")
                     result = {"status": "clicked", "decision": decision, "click_count": len(completed_clicks), "clicks": completed_clicks}
                 else:
                     if question is not None and question.contexts:
                         question.verify_identity(self.capture, self.cancel_event)
-                    if grounded:
-                        self.capture.verify_target(frame, decision["click_x"], decision["click_y"])
-                    click = self.clicker.click(frame, decision["click_x"], decision["click_y"], self.cancel_event)
-                    if grounded:
-                        completed_clicks.append(click)
-                        self.capture.verify_selection(frame, decision, self.cancel_event)
-                        click["selection_verified"] = True
+                    target_frame = single.verify() if single is not None else frame
+                    self.capture.verify_target(target_frame, decision["click_x"], decision["click_y"])
+                    click = self.clicker.click(target_frame, decision["click_x"], decision["click_y"], self.cancel_event)
+                    completed_clicks.append(click)
+                    self.capture.verify_selection(target_frame, decision, self.cancel_event)
+                    click["selection_verified"] = True
+                    if single is not None:
+                        single.confirm(decision)
                     result = {"status": "clicked", "decision": decision, "click": click}
                 self.cycle_count += 1
         except (AIError, VMError, OSError, ValueError, TypeError) as error:

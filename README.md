@@ -279,7 +279,7 @@ them, browser integration tests are skipped. Configuration, fallback, API, SDK,
 hotkey, and overlay tests still run. The login helper test uses a local fixture
 with an installed Chromium browser.
 
-The latest complete run on this host (2026-10-18) passed **290 tests** with all
+The latest complete run on this host (2026-10-20) passed **336 tests** with all
 three integration flags enabled. Local browser fixtures verified combined-image
 uploads and control-ID resolution; API fixtures covered streamed and nonstreamed
 context requests. Separate live Gemini Argon/Medium and Qwen Thinking probes
@@ -408,6 +408,9 @@ heartbeats can keep the tunnel connection active during inference. Seth waits
 for the entire answer and a successful finish before validating or clicking;
 partial, interrupted, or truncated streams never produce clicks. A clean stream
 close after `finish_reason: "stop"` is supported even without a `[DONE]` marker.
+Nonstream completions reject unsuccessful finish reasons, refusals and tool
+calls. Compatible gateways that omit the finish-reason field remain supported;
+an explicit null or unsuccessful reason is rejected.
 The supplied configuration allows 240 seconds for a streamed answer and caps the
 original screenshot age at 300 seconds, leaving time to validate and apply a plan.
 If you hide it, it stays hidden through status changes and continues tracking
@@ -507,12 +510,12 @@ cancels clicking that has not been dispatched. After an unclean shutdown, the
 next listener automatically recovers its abandoned socket. It refuses to replace
 a socket with a live listener or any unrelated file.
 
-For Gemini and API Single capture with the default prompt, the model returns a point on a 0..1000
-grid over the entire screenshot, explicitly
-declaring `coordinate_space: "normalized_1000"`. Seth converts it to actual guest
-pixels locally. Explicit `"pixels"` decisions are also accepted; a missing or
-unknown coordinate space is rejected. Model IDs are passed through unchanged.
-The SDK adapter then accounts for the monitor's origin and VirtualBox's one-based
+Default API, Gemini and Qwen requests use numbered answer-control IDs in both
+Single and Scroll mode. Seth resolves those IDs against the original control
+outlines. Explicit custom prompts can still return normalized or pixel points;
+execution grounds every point to a supported unchecked control before any input.
+Contradictory single-click and multi-selection fields reject the whole response.
+The SDK adapter accounts for the monitor's origin and VirtualBox's one-based
 mouse coordinates. Each frame records the VM UUID, session PID, state-change
 timestamp, monitor, size, and origin. The SDK rechecks those values and capture age before pressing the
 button. A stopped/restarted VM, display change, stale image, invalid decision,
@@ -522,13 +525,13 @@ is 300, allowing for the 240-second inference response budget;
 `clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
 pixel without jitter or simulated host cursor movement.
 
-Qwen receives a temporary copy of the screenshot with numbered badges over
+Each provider receives a temporary copy of the screenshot with numbered badges over
 supported unchecked controls. It returns badge IDs; Seth calculates click pixels
 from the original control outlines. The original VM capture stays unchanged.
 Unknown IDs, wrong control types, and duplicate controls reject the whole plan
 before input. The current local detector supports radios 16–34 pixels across
 and checkboxes 12–34 pixels across on a sufficiently uniform background.
-After each Qwen click, a fresh capture must show the control's interior selected;
+After each click, a fresh capture must show the control's interior selected;
 otherwise the cycle stops without retrying the click. Confirmed clicks include
 `selection_verified: true` in the result. This verifies selection, not correctness.
 Before confirming a grounded selection, Seth moves the guest pointer without
@@ -538,10 +541,17 @@ Seth allows a bounded six-pixel focus margin only while the filled interior,
 control outline, and surrounding context still confirm selection. Control detection
 uses each candidate's local background so alternating table rows retain their IDs.
 Up to 64 controls can receive badges; an answer plan can select at most ten.
-Scroll capture uses the same pointer position
-for its final baseline. A failed confirmation still stops the plan without a
+Single mode also clears hover before its initial inference capture and requires
+a settled baseline. Before each click, it verifies the complete visible question
+and answer content, allowing only previously confirmed control/focus changes.
+A locally verified native browser viewport excludes the desktop clock while
+browser chrome remains an identity check. Without that geometry, the complete
+frame must remain stable. Changed or unsupported dynamic content stops the run.
+After the last click, prior confirmed selections are checked again.
+Scroll capture uses the same pointer position for its baseline.
+A failed confirmation still stops the plan without a
 second click. Partial-plan errors retain the inferred decision and confidence.
-Explicit custom Qwen coordinate prompts instead use a conservative local check
+Explicit custom coordinate prompts use a conservative local check
 within 24 pixels of each predicted point; missing or ambiguous controls stop input.
 
 For long questions, **Ctrl+Shift+E+R** selects Scroll
@@ -624,8 +634,11 @@ frame, and confirms each selection visually. Small vertical offsets on return
 are measured locally before any click; contact-sheet coordinates are never used
 as VM click coordinates. Full status shows **Returning to section …** and selection
 counts. The existing Scroll toggle enables this behavior; no additional hotkey
-or model request is needed for the return trips. API/Gemini Single capture retains
-its coordinate behavior.
+or model request is needed for the return trips. Before the first answer, all
+recorded sections are revisited and compared, including intermediate text and
+diagrams. Forward wheel traversal reuses verified positions to avoid finding the
+top separately for every section. The earliest required capture's age remains
+the click deadline; returning to a fresh screenshot does not reset it.
 
 Between clicks, each panel can also account for a vertical nudge of at
 most three pixels. This requires unchanged VM/question identity and an exact

@@ -274,14 +274,58 @@ class WebClientTests(unittest.TestCase):
             self.client.analyze_screenshot(self.image)
         self.assertEqual(caught.exception.code, "browser_grounding")
 
-    def test_qwen_abstention_and_other_provider_coordinates_are_preserved(self):
-        for provider, raw in (("qwen", '{"action":"none"}'), ("gemini", json.dumps({
-                "action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
-                "confidence": .95, "explanation": "Option D."}))):
-            with self.subTest(provider=provider):
-                self.client.web["providers"] = [provider]
-                with patch.object(self.client, "_run", return_value=raw):
-                    self.assertEqual(self.client.analyze_screenshot(self.image), raw)
+    def test_layout_request_keeps_source_and_prompt_without_annotation(self):
+        self.client.web["providers"] = ["gemini"]
+        def run(provider, deadline, operation):
+            adapter = MagicMock()
+            adapter.exchange.return_value = '{"layout":"read only"}'
+            result = operation(adapter, None)
+            self.assertEqual(adapter.exchange.call_args.args[1:3],
+                             (self.image.resolve(), "Inspect question layout"))
+            return result
+        with patch.object(self.client, "_run", side_effect=run), \
+                patch("web_inference.annotated_controls") as annotate:
+            self.assertEqual(self.client.inspect_layout(self.image, "Inspect question layout"),
+                             '{"layout":"read only"}')
+        annotate.assert_not_called()
+        self.assertFalse(self.client.last_grounded)
+
+    def test_gemini_single_regions_exclude_outside_controls_from_ids(self):
+        self.client.web["providers"] = ["gemini"]
+        with Image.open(self.image) as image:
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((39, 49, 60, 70), outline="#aaa", width=2)
+            draw.ellipse((239, 49, 260, 70), outline="#aaa", width=2)
+            image.save(self.image)
+        def run(provider, deadline, operation):
+            adapter = MagicMock()
+            def exchange(page, upload, prompt, report):
+                self.assertIn('"01": "radio"', prompt)
+                self.assertNotIn('"02": "radio"', prompt)
+                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"Answer"}'
+            adapter.exchange.side_effect = exchange
+            return operation(adapter, None)
+        with patch.object(self.client, "_run", side_effect=run):
+            result = json.loads(self.client.analyze_screenshot(self.image, control_regions=[(200, 0, 320, 200)]))
+        self.assertEqual((result["click_x"], result["click_y"]), (250, 60))
+
+    def test_default_gemini_uses_control_ids_and_rejects_coordinate_only_reply(self):
+        self.client.web["providers"] = ["gemini"]
+        with Image.open(self.image) as image:
+            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline="#aaa", width=2)
+            image.save(self.image)
+        raw = json.dumps({"action": "click", "target_id": "01", "confidence": .95,
+                          "explanation": "Option D."})
+        with patch.object(self.client, "_run", return_value=raw):
+            result = json.loads(self.client.analyze_screenshot(self.image))
+        self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
+        self.assertTrue(self.client.last_grounded)
+        coordinates = json.dumps({"action": "click", "coordinate_space": "pixels",
+                                  "click_x": 180, "click_y": 100, "confidence": .95,
+                                  "explanation": "Coordinates alone are insufficient."})
+        with patch.object(self.client, "_run", return_value=coordinates), self.assertRaises(AIError):
+            self.client.analyze_screenshot(self.image)
+        self.assertFalse(self.client.last_grounded)
 
     def test_total_deadline_is_shared_between_fallbacks(self):
         self.client.web.update(timeout_seconds=5, attempt_timeout_seconds=10)

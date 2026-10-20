@@ -167,7 +167,7 @@ def locate_control(image, x, y, kind):
     return {"kind": kind, "box": [box[0] + left, box[1] + top, box[2] + left, box[3] + top]}, round(cx), round(cy)
 
 
-def ground_decision(image_path, decision):
+def ground_decision(image_path, decision, *, regions=None):
     """Resolve every target before returning any part of a Qwen click plan."""
     result = deepcopy(decision)
     points = result["selections"] if result["action"] == "select" else [result]
@@ -177,6 +177,11 @@ def ground_decision(image_path, decision):
         for point in points:
             x, y = point["click_x"], point["click_y"]
             control, cx, cy = locate_control(image, x, y, kind)
+            if regions is not None and not any(
+                    left <= control['box'][0] < control['box'][2] <= right
+                    and top <= control['box'][1] < control['box'][3] <= bottom
+                    for left, top, right, bottom in regions):
+                raise AIError('Answer control lies outside the verified question area; no input sent.', 'browser_grounding')
             identity = tuple(control["box"])
             if identity in controls:
                 raise AIError("Multiple answer points resolve to the same control; no input sent.", "browser_grounding")

@@ -1,6 +1,7 @@
 """Local control IDs and verified return trips for captured question panels."""
 
 from collections import defaultdict
+from dataclasses import replace
 
 from PIL import Image, ImageChops
 
@@ -89,7 +90,11 @@ class ScrollNavigator:
         self.current = question.frame
         self.selected = set()
         self.returned_views = []
-        self.identity_verified = not bool(question.layout)
+        self.identity_verified = False
+        self.collector.inference_question = question
+        if question.wheel_navigation is not None:
+            question.wheel_navigation.collector.inference_question = question
+            question.wheel_navigation.collector.stop_event = stop_event
         self.alignment_ignores = question.ignore_boxes + question.occlusion_boxes
         self.records, self.offsets, self.segments = {}, {}, {}
         self.view_controls = defaultdict(dict)
@@ -307,8 +312,8 @@ class ScrollNavigator:
                 if region == exclude:
                     continue
                 panel = panels.get(region)
-                if panel is not None and self.views[self.active[panel]].wheel_step is None:
-                    view = self.views[self.active[panel]]
+                view = self.views[self.active[panel]] if panel is not None else None
+                if view is not None and view.wheel_step is None:
                     original = find_scrollbar(before, view.region)
                     actual = find_scrollbar(after, view.region)
                     if original is None or not same_bar(original, actual, position=True):
@@ -368,12 +373,16 @@ class ScrollNavigator:
                 raise ScrollNavigationError('Returned answer view does not match its capture; no answer input.') from None
 
     def _restore(self, view, fresh):
+        self.question.validate_age(self.config)
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise ScrollNavigationError('Scroll navigation cancelled; no further input.')
         key = view.key
         if self.active[view.panel] == key:
             return fresh
         self.report(f'Returning to section {key}')
         if view.wheel_step is not None:
-            fresh = self.question.wheel_navigation.restore(view, fresh)
+            fresh = self.question.wheel_navigation.restore(view, fresh,
+                previous=self.views[self.active[view.panel]] if self.shifts[view.panel] == 0 else None)
             proposed = self._verify_unchanged(fresh, exclude=view.bar.panel)
             shift = self._return_shift(view, fresh)
             self.active[view.panel], proposed[view.panel] = key, shift
@@ -423,18 +432,14 @@ class ScrollNavigator:
         key = control['target_view']
         fresh = self.verify_current()
         if not self.identity_verified:
-            # A whole-page heading may now be off-screen. Recheck a recorded
-            # question section after inference even when the answer is already
-            # visible and the URL has not changed (for example, in an SPA).
-            question_boxes = {tuple(area['box']) for area in self.question.layout
-                              if area['role'] in ('question', 'both') and
-                              (area['scrollbar_id'] is not None or area.get('scroll_method') == 'wheel')}
-            checked = set()
+            # Every recorded section contributed to inference, including answer
+            # text and intermediate question content. Verify them all before
+            # the first selection, traversing wheel sections in capture order.
             for view in self.views.values():
-                if view.bar.panel in question_boxes and view.panel not in checked:
-                    fresh = self._restore(view, fresh)
-                    self._verify_question_section(view, fresh)
-                    checked.add(view.panel)
+                self.question.validate_age(self.config)
+                self.collector.check(self.question.frame, fresh, self.question.identity_box)
+                fresh = self._restore(view, fresh)
+                self._verify_question_section(view, fresh)
             self.identity_verified = True
         shift = 0
         if key != 'live':
@@ -449,7 +454,9 @@ class ScrollNavigator:
         if actual['box'] != expected:
             raise ScrollNavigationError('Returned control does not match its captured location; no answer input.')
         self.current = fresh
-        return fresh, point | {'click_x': x, 'click_y': y, 'target_control': actual}
+        self.collector.check(self.question.frame, fresh, self.question.identity_box)
+        execution = replace(fresh, captured_at=min(fresh.captured_at, self.question.inference_captured_at))
+        return execution, point | {'click_x': x, 'click_y': y, 'target_control': actual}
 
     def verify_selection(self, frame, point):
         """Confirm a click after measuring tiny independent panel movements."""

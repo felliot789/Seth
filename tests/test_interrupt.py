@@ -7,8 +7,9 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -27,6 +28,14 @@ class InterruptTests(unittest.TestCase):
     def setUp(self):
         self.engine = SethEngine(CONFIG, execute=True, manual_selection=True)
         self.frame = Frame(Path('dummy.png'), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        # These tests isolate cycle interruption; Single content identity and
+        # control grounding have dedicated image fixtures elsewhere.
+        question = SimpleNamespace(frame=self.frame, regions=None, verify=Mock(return_value=self.frame), confirm=Mock())
+        for mocker in (patch('main.prepare_single', return_value=question),
+                       patch('main.ground_decision', side_effect=lambda path, decision, **kwargs: decision),
+                       patch.object(self.engine.capture, 'verify_selection')):
+            mocker.start()
+            self.addCleanup(mocker.stop)
 
     def test_interrupt_during_each_provider_returns_idle_and_next_request_works(self):
         for provider in ('api', 'gemini', 'qwen'):
@@ -145,6 +154,27 @@ class InterruptTests(unittest.TestCase):
         self.assertTrue(self.engine.cancel_event.is_set())
         self.assertFalse(self.engine.cycle_provider())
 
+    def test_engine_interrupt_and_shutdown_publish_before_returning(self):
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                engine = SethEngine(CONFIG, execute=True, manual_selection=True)
+                published = []
+                unregister = engine.cancel_event.register(lambda: published.append(True))
+                engine._cycle_lock.acquire()
+                engine._begin_cycle()
+                try:
+                    if shutdown:
+                        engine.stop_event.set()
+                    else:
+                        self.assertTrue(engine.interrupt_cycle())
+                    self.assertTrue(published)
+                finally:
+                    unregister()
+                    engine._cycle_active = False
+                    engine._cycle_lock.release()
+                self.assertFalse(engine.stop_event._callbacks)
+                self.assertFalse(engine.cancel_event.interrupted._callbacks)
+
     def test_wait_observes_interrupt_and_shutdown(self):
         for shutdown in (False, True):
             stop = threading.Event()
@@ -191,7 +221,7 @@ class CancellableAPITests(unittest.TestCase):
                     else:
                         self.send_response(530 if owner.mode == 'error' else 200)
                         self.end_headers()
-                        self.wfile.write(json.dumps({'choices': [{'message': {'content': json.dumps(DECISION)}}]}).encode())
+                        self.wfile.write(json.dumps({'choices': [{'message': {'content': json.dumps(DECISION)}, 'finish_reason': 'stop'}]}).encode())
                 except (BrokenPipeError, ConnectionResetError):
                     pass
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -224,7 +254,7 @@ class CancellableAPITests(unittest.TestCase):
                 errors = []
                 def request():
                     try:
-                        self.client.analyze_screenshot(self.image)
+                        self.client.analyze_screenshot(self.image, prompt='Test cancellation transport')
                     except AIError as error:
                         errors.append(error.code)
                 thread = threading.Thread(target=request)
@@ -245,17 +275,17 @@ class CancellableAPITests(unittest.TestCase):
                 self.stop.clear()
                 self.mode = 'success'
                 self.client.api['stream'] = streaming
-                self.assertEqual(json.loads(self.client.analyze_screenshot(self.image)), DECISION)
+                self.assertEqual(json.loads(self.client.analyze_screenshot(self.image, prompt='Test cancellation transport')), DECISION)
 
     def test_error_code_survives_worker_and_already_cancelled_request_never_posts(self):
         self.mode = 'error'
         with self.assertRaises(AIError) as caught:
-            self.client.analyze_screenshot(self.image)
+            self.client.analyze_screenshot(self.image, prompt='Test cancellation transport')
         self.assertEqual(caught.exception.code, 'gateway_unavailable')
         self.stop.set()
         self.mode = 'blocked'
         with self.assertRaises(AIError) as caught:
-            self.client.analyze_screenshot(self.image)
+            self.client.analyze_screenshot(self.image, prompt='Test cancellation transport')
         self.assertEqual(caught.exception.code, 'cancelled')
         self.assertFalse(self.arrived.is_set())
 

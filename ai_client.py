@@ -67,7 +67,7 @@ class SethAIClient(DecisionClient):
 
     def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
         self.last_grounded = False
-        if not context_images and scroll_targets is None:
+        if prompt is not None and not context_images and scroll_targets is None:
             return self._analyze_screenshot(image_path, prompt, response_format)
         if prompt:
             raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
@@ -83,6 +83,7 @@ class SethAIClient(DecisionClient):
 
     def inspect_layout(self, image_path, prompt):
         """A separate read-only layout request, never parsed as an answer plan."""
+        self.last_grounded = False
         return self._analyze_screenshot(image_path, prompt)
 
     def _analyze_screenshot(self, image_path, prompt=None, response_format=None):
@@ -195,7 +196,14 @@ class SethAIClient(DecisionClient):
                 completion = response.json()
                 if isinstance(completion, dict) and completion.get("error") is not None:
                     raise AIError("Inference returned an API error inside HTTP 200; check provider, model, vision, and JSON-mode support.")
-                message = completion["choices"][0]["message"]
+                choice = completion["choices"][0]
+                # Legacy compatible gateways omit finish_reason entirely. An
+                # explicit reason must still prove a completed plain answer.
+                if "finish_reason" in choice and choice["finish_reason"] != "stop":
+                    raise AIError("Inference did not complete a plain text answer; no click was attempted.")
+                message = choice["message"]
+                if not isinstance(message, dict) or any(message.get(key) for key in ("refusal", "tool_calls", "function_call")):
+                    raise AIError("Inference returned a refusal or tool call; no click was attempted.")
                 content = message["content"]
             except (ValueError, KeyError, IndexError, TypeError):
                 raise AIError("Inference returned an invalid chat completion.") from None

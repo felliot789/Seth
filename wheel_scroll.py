@@ -82,11 +82,14 @@ class WheelScroll:
                 unchanged = 0
         raise ScrollLayoutError('Could not establish the top of the question within the wheel limit; no answer input.')
 
-    def restore(self, view, fresh):
-        # Always replay from a visually established top. A clamped final wheel
-        # burst may contain extra ticks, so subtracting counts from bottom is unsafe.
-        fresh = self.top(fresh)
-        remaining = view.wheel_step
+    def restore(self, view, fresh, *, previous=None):
+        # Forward traversal from an exactly verified recorded position can
+        # reuse its tick count. Never subtract clamped bottom ticks upward.
+        if previous is not None and previous.wheel_step < view.wheel_step:
+            remaining = view.wheel_step - previous.wheel_step
+        else:
+            fresh = self.top(fresh)
+            remaining = view.wheel_step
         while remaining:
             ticks = min(6, remaining)
             fresh = self.move(fresh, ticks)

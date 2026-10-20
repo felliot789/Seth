@@ -126,13 +126,27 @@ class VirtualBoxBackend:
                         marker.touch(mode=0o600)
                         return
 
-            relay = threading.Thread(target=relay_cancel, name="seth-input-cancel")
-            relay.start()
+            # Engine tokens publish while set() is executing, before the SDK's
+            # next cancellation check. Plain threading.Event callers retain the
+            # compatibility relay because those events have no subscriptions.
+            unregister = None
+            relay = None
             try:
+                register = getattr(stop_event, "register", None)
+                if register is not None:
+                    unregister = register(lambda: marker.touch(mode=0o600))
+                if unregister is None or getattr(stop_event, "requires_cancel_relay", False):
+                    relay = threading.Thread(target=relay_cancel, name="seth-input-cancel")
+                    relay.start()
+                if stop_event.is_set():
+                    marker.touch(mode=0o600)
                 return send(cancel_path=str(marker))
             finally:
+                if unregister is not None:
+                    unregister()
                 finished.set()
-                relay.join()
+                if relay is not None:
+                    relay.join()
 
 
 def _snapshot(machine, console, constants, screen):

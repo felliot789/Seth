@@ -35,8 +35,28 @@ class FakeDisplay:
         image = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(image)
         draw.text((20, 30), "Test question: select B", fill="black")
-        draw.rectangle((120, 80, 180, 120), outline="black")
-        draw.text((145, 100), "B", fill="black")
+        selected = set()
+        if log := os.environ.get("SETH_TEST_VBOX_LOG"):
+            path = Path(log)
+            if path.exists():
+                for line in path.read_text().splitlines():
+                    event = json.loads(line)
+                    args = event.get("args", [])
+                    if event.get("kind") == "mouse" and args[-1:] == [1] and args[0] == 151:
+                        selected.add(args[1] - 1)
+        kind = os.environ.get("SETH_TEST_CONTROL_KIND", "radio")
+        for row, y in enumerate((60, 100, 140)):
+            box = (139, y - 11, 160, y + 10)
+            if kind == "checkbox":
+                draw.rounded_rectangle(box, radius=2, outline="#aaa", width=2,
+                                       fill="#0877c9" if y in selected else None)
+                if y in selected:
+                    draw.line((145, y, 149, y + 4, 155, y - 4), fill="white", width=2)
+            else:
+                draw.ellipse(box, outline="#aaa", width=2)
+                if y in selected:
+                    draw.ellipse((146, y - 4, 153, y + 3), fill="#0877c9")
+            draw.text((175, y - 5), f"Answer {row + 1}", fill="black")
         stream = io.BytesIO()
         image.save(stream, format="PNG")
         if self.after_capture:

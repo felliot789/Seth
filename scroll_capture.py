@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from control_targets import _components
 from scroll_limits import MAX_SCROLL_VIEWS
-from vbox_backend import VMError
+from vbox_backend import VMError, validate_age
 
 
 class ScrollLimitError(VMError):
@@ -163,6 +163,16 @@ class ScrolledQuestion:
     overlay_tracker: object = None
     wheel_navigation: object = None
 
+    @property
+    def inference_captured_at(self):
+        """The oldest required inference section owns the execution deadline."""
+        return min(frame.captured_at for frame in [self.frame] + [view.frame for view in self.views])
+
+    def validate_age(self, config):
+        maximum = config.get('capture', {}).get('max_age_seconds', 90)
+        for frame in [self.frame] + [view.frame for view in self.views]:
+            validate_age(frame.captured_at, maximum)
+
     def navigate(self, config, capture, stop_event=None, report=lambda message: None):
         from scroll_navigation import ScrollNavigator
         return ScrollNavigator(self, config, capture, stop_event, report)
@@ -198,10 +208,13 @@ class ScrollCollector:
         self.stop_event, self.report = stop_event, report
         self.identity_boxes, self.ignore_boxes = identity_boxes, ignore_boxes
         self.overlay_tracker = overlay_tracker
+        self.inference_question = None
 
     def check(self, reference, fresh, identity_box):
         if self.stop_event is not None and self.stop_event.is_set():
             raise VMError('Scroll capture cancelled; no further input.')
+        if self.inference_question is not None:
+            self.inference_question.validate_age(self.config)
         if fresh.display != reference.display:
             raise VMError('VM display changed during scroll capture; no further input.')
         with Image.open(reference.path) as before, Image.open(fresh.path) as after:

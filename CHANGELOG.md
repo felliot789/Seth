@@ -1,5 +1,27 @@
 # Development milestones
 
+## 2026-10-20 — Repair all nine behavior audit findings
+
+- Ground default API and Gemini Single replies to numbered controls and confirm
+  every provider's selections. Clear initial hover before inference and compare
+  the complete visible Single question between clicks, including earlier choices
+  after the final click. Reject blank-space targets and changed question text.
+- Recheck every recorded scroll section before the first answer; reuse verified
+  forward wheel positions. Fix pixel-nudge alignment and preserve the earliest
+  inference capture deadline through return navigation and the clicker.
+- Publish SDK cancellation markers synchronously for engine interruption and
+  shutdown, including registration races; preserve release and cleanup/rearm.
+- Reject contradictory action schemas and unsuccessful nonstream completion
+  metadata, refusals and tool calls. Keep explicit compatibility for gateways
+  that omit finish reasons entirely.
+- Add focused regressions and migrate helper integration fixtures to real
+  control IDs and visible selection state. See the
+  [repair notes](docs/audit-fixes-2026-10-20.md) for coverage and live-check scope.
+- Passed all 336 full-suite tests with browser integrations enabled. After final
+  viewport-settling refinement, eight Single/helper checks and two resize
+  regressions also passed. SDK status/capture succeeded on the locked VM;
+  a fresh live quiz cycle remains unverified.
+
 ## 2026-10-19 — Capture long questions with image answer choices
 
 - Raise the supported capture bound from 12 to 32 views. Extend bounded upward

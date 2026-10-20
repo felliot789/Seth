@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -31,6 +32,15 @@ class RuntimeSelectionTests(unittest.TestCase):
         self.config = copy.deepcopy(CONFIG)
         self.engine = SethEngine(self.config, manual_selection=True)
         self.frame = Frame(Path('dummy.png'), GuestDisplay(**TEST_DISPLAY), time.monotonic())
+        # Provider lifecycle tests use a synthetic frame; content identity and
+        # grounding are covered with actual image fixtures in Single tests.
+        question = SimpleNamespace(frame=self.frame, regions=None,
+                                   verify=Mock(return_value=self.frame), confirm=Mock())
+        for mocker in (patch('main.prepare_single', return_value=question),
+                       patch('main.ground_decision', side_effect=lambda path, decision, **kwargs: decision),
+                       patch.object(self.engine.capture, 'verify_selection')):
+            mocker.start()
+            self.addCleanup(mocker.stop)
 
     def test_startup_is_api_single_and_switching_never_starts_work_or_mutates_configuration(self):
         original = copy.deepcopy(self.config)
@@ -94,7 +104,7 @@ class RuntimeSelectionTests(unittest.TestCase):
             self.engine.run_cycle()
             collector.assert_not_called()
             self.assertEqual(analyze.call_args.args, (self.frame.path,))
-            self.assertEqual(analyze.call_args.kwargs, {})
+            self.assertEqual(analyze.call_args.kwargs, {'control_regions': None})
         fresh = SethEngine(self.config, manual_selection=True)
         self.assertEqual(fresh.indicator_selection, 'API · Single')
 
