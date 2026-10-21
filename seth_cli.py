@@ -218,8 +218,8 @@ def doctor(config):
     if not os.access("/dev/uinput", os.R_OK | os.W_OK):
         issues.append("No access to /dev/uinput. Install the udev/module rules described in docs/setup.md.")
     import evdev
-    from hotkey import COLOR_LETTERS, CTRL, FORMAT_LETTERS, INTERRUPT_LETTERS, LETTERS, SELECT_LETTERS
-    required = LETTERS | SELECT_LETTERS | COLOR_LETTERS | FORMAT_LETTERS | INTERRUPT_LETTERS
+    from hotkey import CAPTURE_LETTERS, COLOR_LETTERS, CTRL, FORMAT_LETTERS, INTERRUPT_LETTERS, LETTERS, SELECT_LETTERS
+    required = LETTERS | SELECT_LETTERS | COLOR_LETTERS | FORMAT_LETTERS | INTERRUPT_LETTERS | CAPTURE_LETTERS
     keyboards = []
     selected = config.get("hotkey", {}).get("devices")
     for path in selected if selected is not None else evdev.list_devices():

@@ -1,4 +1,4 @@
-"""Read-only VirtualBox framebuffer access in an isolated host SDK helper."""
+"""VirtualBox framebuffer access and button-free scrolling in an SDK helper."""
 
 from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass
@@ -45,7 +45,8 @@ class VirtualBoxBackend:
             raise VMError("vm.screen must be a nonnegative integer.")
         if not isinstance(self.python, str) or not self.python:
             raise VMError("vm.sdk_python must name a Python interpreter with the VirtualBox SDK installed.")
-        request = {"operation": operation, "target": self.target, "screen": self.screen, **data}
+        request = {"operation": operation, "target": data.get("expected", {}).get("vm_uuid", self.target),
+                   "screen": self.screen, **data}
         helper_env = {name: value for name, value in os.environ.items() if not name.endswith("API_KEY")}
         with self._request_lock:
             try:
@@ -94,6 +95,12 @@ class VirtualBoxBackend:
         result = self._request("capture", path=str(Path(path).resolve()))
         return GuestDisplay(**result["display"]), result["captured_at"]
 
+    def scroll(self, frame, ticks, stop_event=None):
+        if stop_event is not None and stop_event.is_set():
+            raise VMError("Scroll capture cancelled.")
+        return self._request("scroll", expected=asdict(frame.display),
+                             captured_at=frame.captured_at, ticks=ticks)
+
 def _snapshot(machine, console, constants, screen):
     if machine.state != constants.MachineState_Running:
         raise VMError("Target VM must be running.")
@@ -107,9 +114,12 @@ def _snapshot(machine, console, constants, screen):
 
 
 def sdk_operation(request, manager_factory=None, *, close_manager=True):
-    """Only status and capture are supported. The helper has no VM input path."""
-    if request.get("operation") not in ("status", "capture"):
-        raise VMError("Seth is capture-only; VM input operations are disabled.")
+    """Only status, capture and button-free scrolling are supported."""
+    if request.get("operation") not in ("status", "capture", "scroll"):
+        raise VMError("Seth only captures and scrolls; answer/input operations are disabled.")
+    if request["operation"] == "scroll" and (type(request.get("ticks")) is not int
+                                             or not 1 <= abs(request["ticks"]) <= 4):
+        raise VMError("Scroll requires one to four signed wheel ticks.")
     if manager_factory is None:
         try:
             from vboxapi import VirtualBoxManager
@@ -138,6 +148,20 @@ def sdk_operation(request, manager_factory=None, *, close_manager=True):
                     "display_blank": display.monitor_status == constants.GuestMonitorStatus_Blank}
         if display.monitor_status == constants.GuestMonitorStatus_Blank:
             raise VMError("Guest display is blank/asleep; wake it in VirtualBox and retry capture.")
+        if request["operation"] == "scroll":
+            if display != GuestDisplay(**request["expected"]):
+                raise VMError("VM or display changed before scrolling.")
+            age = time.monotonic() - request["captured_at"]
+            if not 0 <= age <= 3:
+                raise VMError("Scroll capture is stale; no scroll sent.")
+            mouse = console.mouse
+            if not mouse.absoluteSupported:
+                raise VMError("Scroll mode needs an absolute pointing device (VirtualBox USB Tablet).")
+            # The page has one whole-window scrollbar. Position over its right
+            # margin; no button or keyboard event is ever sent. SDK pixels are 1-based.
+            x, y = display.x_origin + display.width - 24, display.y_origin + display.height // 2 + 1
+            mouse.putMouseEventAbsolute(x, y, request["ticks"], 0, 0)
+            return {"scroll_ticks": request["ticks"]}
         captured_at = time.monotonic()
         png = console.display.takeScreenShotToArray(screen, display.width, display.height,
                                                    constants.BitmapFormat_PNG)

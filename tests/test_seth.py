@@ -137,7 +137,7 @@ class VirtualBoxSDKTests(unittest.TestCase):
     def test_all_input_operations_are_rejected_before_sdk_access(self):
         for operation in ("click", "move", "wheel", "drag", "keyboard", "type"):
             factory = Mock()
-            with self.subTest(operation=operation), self.assertRaisesRegex(VMError, "capture-only"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(VMError, "operations are disabled"):
                 sdk_operation({"operation": operation}, factory)
             factory.assert_not_called()
         backend = VirtualBoxBackend(configuration("."))
@@ -183,6 +183,22 @@ class VirtualBoxSDKTests(unittest.TestCase):
 
 
 class APITests(unittest.TestCase):
+    def test_ordered_image_batch_sends_original_bytes_in_one_request(self):
+        with tempfile.TemporaryDirectory() as root, LocalAPI() as api:
+            paths = [Path(root) / f"section_{n}.png" for n in range(3)]
+            for n, path in enumerate(paths):
+                Image.new("RGB", (320, 200), (n * 90, 30, 10)).save(path)
+            config = configuration(root)
+            config["api"].update(base_url=api.url, stream=False)
+            raw = SethAIClient(config).analyze_screenshots(paths, "table")
+            self.assertEqual(len(api.requests), 1)
+            content = api.requests[0][2]["messages"][0]["content"]
+            self.assertIn("count each option/table row ONCE", content[0]["text"])
+            images = [item["image_url"]["url"] for item in content if item["type"] == "image_url"]
+            self.assertEqual([base64.b64decode(url.split(",", 1)[1]) for url in images],
+                             [path.read_bytes() for path in paths])
+            self.assertEqual(json.loads(raw), DECISION)
+
     def test_original_unbadged_image_bytes_are_sent_once_with_manual_format(self):
         for streaming in (False, True):
             for fmt in ("PNG", "JPEG"):

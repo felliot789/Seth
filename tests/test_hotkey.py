@@ -182,14 +182,14 @@ class HotkeyTests(unittest.TestCase):
         finally:
             hotkey.stop()
 
-    def test_all_six_actions_dispatch_only_to_their_own_callback(self):
-        self.device.capabilities.return_value = {1: [16, 17, 18, 19, 32, 33, 34, 44, 29, 42]}
-        run, indicator, provider, capture, text_color, interrupt = (Mock(return_value=True) for _ in range(6))
+    def test_all_seven_actions_dispatch_only_to_their_own_callback(self):
+        self.device.capabilities.return_value = {1: [16, 17, 18, 19, 32, 33, 34, 44, 29, 42, 31]}
+        run, indicator, provider, capture, text_color, interrupt, capture_mode = (Mock(return_value=True) for _ in range(7))
         hotkey = SethHotkey(run, toggle_callback=indicator, provider_callback=provider, format_callback=capture,
-                           text_color_callback=text_color, interrupt_callback=interrupt)
+                           text_color_callback=text_color, interrupt_callback=interrupt, capture_mode_callback=capture_mode)
         hotkey.start()
         events = []
-        for letters, shifted in (((32, 33), False), ((32, 33), True), ((18, 19), False), ((44,), True), ((16, 17), True), ((34,), True)):
+        for letters, shifted in (((32, 33), False), ((32, 33), True), ((18, 19), False), ((44,), True), ((16, 17), True), ((34,), True), ((31,), True)):
             modifiers = [29] + ([42] if shifted else [])
             events += [(key, 1) for key in modifiers + list(letters)]
             events += [(key, 0) for key in reversed(modifiers + list(letters))]
@@ -197,7 +197,7 @@ class HotkeyTests(unittest.TestCase):
         try:
             with patch('hotkey.select.select', return_value=([self.device], [], [])):
                 hotkey.poll()
-            for callback in (run, indicator, provider, capture, text_color, interrupt):
+            for callback in (run, indicator, provider, capture, text_color, interrupt, capture_mode):
                 callback.assert_called_once_with()
             self.assertTrue(all(call.args[1] in (29, 42) for call in self.virtual.write.call_args_list))
         finally:
@@ -338,6 +338,27 @@ class SelectionChordTests(unittest.TestCase):
 
 
 class FormatChordTests(unittest.TestCase):
+    def test_capture_mode_chord_waits_for_release_and_preserves_ordinary_s(self):
+        for modifiers in ((29, 42), (42, 29), (97, 54)):
+            chord = ChordFilter(enable_capture_mode=True)
+            actions = []
+            events = [(key, 1) for key in modifiers] + [(31, 1), (31, 2), (31, 0)]
+            events += [(key, 0) for key in reversed(modifiers)]
+            for index, event in enumerate(events):
+                _, action = chord.feed(*event)
+                if action:
+                    actions.append((index, action))
+            self.assertEqual(actions, [(len(events) - 1, "capture_mode")])
+        for keys in ((31,), (29, 31), (42, 31)):
+            chord = ChordFilter(enable_capture_mode=True)
+            events = [(key, 1) for key in keys] + [(key, 0) for key in reversed(keys)]
+            output = []
+            for event in events:
+                forwarded, fired = chord.feed(*event)
+                self.assertFalse(fired)
+                output.extend(forwarded)
+            self.assertEqual(output, events)
+
     def test_ctrl_shift_z_fires_once_after_full_release_in_either_modifier_order(self):
         for modifiers in ((29, 42), (42, 29), (97, 54), (54, 97)):
             chord = ChordFilter(enable_format=True)

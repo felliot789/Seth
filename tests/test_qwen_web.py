@@ -104,7 +104,9 @@ async function uploadFile(event){
  image.alt=scenario==='wrong_file'?'other.png':file.name;
  if(scenario==='jpeg_suffix')image.alt=file.name.replace(/\.(png|jpe?g)$/i,'_16fa84.jpg');
  const progress=document.createElement('span');progress.className='anticon anticon-spin vision-item-loading-icon';
- preview.append(image,progress);files.replaceChildren(preview);send.disabled=!draft;
+ preview.append(image,progress);
+ if(scenario==='batch_drop')files.replaceChildren(preview);else files.append(preview);
+ send.disabled=!draft;
  // Even a preview and enabled Send can precede completion of image processing.
  setTimeout(()=>{uploadReady=true;preview.classList.remove('vision-item-container-uploading');
    progress.remove();window.events.push('ready');},200);
@@ -113,6 +115,7 @@ input.addEventListener('change',uploadFile);
 send.onclick=()=>{
  if(!uploadReady||!draft)throw new Error('Submission before upload/component readiness');
  window.submissions++;window.events.push('submit');window.submittedPrompts.push(draft);
+ window.submittedFiles=Array.from(files.querySelectorAll('img')).map(e=>e.alt);
  const user=document.createElement('div');user.className='qwen-chat-message-user';user.textContent=draft;
  const assistant=document.createElement('div');assistant.className='qwen-chat-message-assistant';
  assistant.innerHTML='<div class="qwen-chat-thinking-status-card-completed"><div class="qwen-markdown"></div><button aria-label="Copy">Copy thinking</button></div>';
@@ -122,7 +125,7 @@ send.onclick=()=>{
  setTimeout(()=>{
    const final=document.createElement('div');final.className='response-message-content phase-answer';
    final.innerHTML='<div class="qwen-markdown"><pre><code></code></pre></div>';
-   const decision={status:'answer',confidence:0.99,answer:'2'};
+   const decision={status:'answer',confidence:0.99,answer:scenario==='batch'?'L, R, L':'2'};
    final.querySelector('code').textContent=JSON.stringify(decision);
    if(scenario==='rendered_code'){
      const answer={status:'answer',confidence:0.99,
@@ -276,6 +279,28 @@ class QwenUploadReadinessTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1",
                      "Set SETH_CHROMIUM_TESTS=1 for offline Qwen Chromium integration")
 class QwenChromiumIntegrationTests(unittest.TestCase):
+    def test_ordered_batch_uploads_every_image_before_one_submission(self):
+        paths = [self.root / f"section_{n}.png" for n in range(3)]
+        for n, path in enumerate(paths):
+            Image.new("RGB", (320, 200), (n * 80, 20, 40)).save(path)
+        before = len(self.uploads)
+        with self.browser() as page:
+            raw = self.adapter("batch").exchange(page, paths, "Read one table across three overlapping sections", lambda _: None)
+            self.assertEqual(parse_decision(raw, "table")["answer"], "L, R, L")
+            self.assertEqual(page.evaluate("window.submissions"), 1)
+            self.assertEqual(page.evaluate("window.submittedFiles"), [path.name for path in paths])
+            self.assertEqual(page.evaluate("window.menuSelections"), len(paths))
+        self.assertEqual(self.uploads[before:], [path.read_bytes() for path in paths])
+
+    def test_replaced_earlier_attachment_prevents_submission(self):
+        second = self.root / "second.png"
+        Image.new("RGB", (320, 200), "red").save(second)
+        with self.browser() as page:
+            with self.assertRaises(AIError) as caught:
+                self.adapter("batch_drop").exchange(page, [self.image, second], "One question", lambda _: None)
+            self.assertEqual(caught.exception.code, "browser_layout")
+            self.assertEqual(page.evaluate("window.submissions"), 0)
+
     @classmethod
     def setUpClass(cls):
         cls.uploads = []

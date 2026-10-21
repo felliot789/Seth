@@ -1,5 +1,16 @@
 # Changelog
 
+## Automatic Scroll mode
+
+- Ctrl+Shift+S switches Single/Scroll; Ctrl+D+F runs the selected mode.
+- Scroll automatically seeks the top, captures overlapping original screenshots
+  to the bottom, and sends the ordered batch in one provider request.
+- Shared prompts count overlapping options/table rows once across the question.
+- Coverage/settling, VM identity, image/time limits, and cancellation are checked.
+- Browser uploads verify all sections before submission. Incomplete batches stop.
+- VM input is limited to button-free scrolling; answer operations remain disabled.
+- Single mode remains the default and retains its capture-only behavior.
+
 ## Capture and answer-key revamp
 
 Seth now follows a single path: capture the visible VM screen, ask the selected

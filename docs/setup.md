@@ -91,6 +91,12 @@ profile with Gemini. Preserve that sharing to retain the existing sign-ins.
 Provider and format shortcuts change the running listener only; a restart reads
 the configured defaults again.
 
+Ctrl+Shift+S selects Single or Scroll while idle. Scroll mode moves the VM pointer
+to the page's right margin and uses button-free wheel events to capture one
+whole-page question from top to bottom. The guest must support absolute mouse
+input (for example, a VirtualBox USB Tablet). Make that device change through
+VirtualBox yourself if required; Single mode does not need it.
+
 After `.env`, provider, format, confidence, or capture-setting changes, use
 `seth restart listener`. Browser configuration changes may need a browser restart,
 which closes its windows and can require signing in again.
@@ -105,6 +111,8 @@ which closes its windows and can require signing in again.
 | `vm.screen` | Zero-based monitor, default `0` |
 | `vm.sdk_python` | Optional SDK-compatible Python executable; default the running Python |
 | `capture.output_dir` | Capture/reply directory relative to the configuration directory; default `captures` |
+| `capture.mode` | Startup `single` or `scroll`; default `single` |
+| `capture.max_frames` | Scroll image limit, from 2 to 16; default `8` |
 | `min_confidence` | Finite value from 0 to 1; default `0.85` |
 | `api.base_url`, `api.api_key`, `api.model` | API settings overridden by the three `INFERENCE_*` variables |
 | `api.timeout_seconds` | Positive response timeout, at most 300 seconds; default `120`, configured `240` |
@@ -119,9 +127,10 @@ which closes its windows and can require signing in again.
 | `hotkey.devices` | Optional list of host keyboard event-device paths |
 
 Table mode supports two category columns. L and R refer to the visible left and
-right columns, rather than particular category names. Fit all rows into the
-captured screen. MC/MCMA numbers identify option positions, not the text of an
-option that happens to contain a number.
+right columns, rather than particular category names. In Single mode, fit all
+rows into the captured screen. In Scroll mode, overlapping rows appear only once
+in the answer list, and numbering continues across all sections. MC/MCMA numbers
+identify option positions, not the text of an option that contains a number.
 
 ## Data and diagnostics
 
@@ -138,13 +147,17 @@ To inspect VM metadata without asking a provider:
 ```sh
 .venv/bin/python main.py --mode status
 .venv/bin/python main.py --mode capture
+.venv/bin/python main.py --mode capture --capture-mode scroll
 ```
 
-`capture` saves one screenshot and prints its path/display metadata. An explicit
+`capture` saves screenshot(s) and prints their ordered paths/display metadata,
+without sending them to a provider. Scroll capture moves the page automatically.
+An explicit
 terminal-only inference run is:
 
 ```sh
 .venv/bin/python main.py --mode once --provider api --question-type mc
+.venv/bin/python main.py --mode once --capture-mode scroll --provider api --question-type table
 ```
 
 It prints JSON to the terminal; it does not update the managed status bar.

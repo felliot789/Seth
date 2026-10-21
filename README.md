@@ -3,7 +3,7 @@
 Capture a question from a running Windows VM, ask your selected provider, and
 read the answer keys in the host status bar.
 
-**One screenshot → one provider → answer keys.**
+**Capture one question → one provider → answer keys.**
 
 | Question format | Status-bar answer |
 | --- | --- |
@@ -11,9 +11,11 @@ read the answer keys in the host status bar.
 | MCMA | `1, 3, 5` — all selected option numbers |
 | Table categorization | `L, R, L, R, R` — left/right column, one entry per row from top to bottom |
 
-Seth captures the currently visible guest screen as an unmodified PNG. Make the
-whole question and its choices visible first. Choose the question format and
-provider yourself; Seth displays the result without operating the VM.
+Choose the question format, provider, and capture mode yourself. Single mode
+captures the currently visible guest screen as an unmodified PNG. Scroll mode
+automatically goes to the top and collects overlapping screenshots down to the
+bottom, then sends the ordered images together in one request. Seth displays the
+answer keys; it never selects or submits answers.
 
 ## Daily use
 
@@ -28,13 +30,24 @@ seth up
 | Ctrl+D+F | Capture, ask the selected provider, display keys |
 | Ctrl+E+R | Switch API → Qwen → Gemini → API |
 | Ctrl+Shift+Z | Switch MC → MCMA → Table → MC |
+| Ctrl+Shift+S | Switch Single ↔ Scroll capture |
 | Ctrl+Shift+G | Cancel the current request |
 | Ctrl+Shift+D+F | Cycle indicator Full → Hidden → Dot → Full |
 | Ctrl+Shift+Q+W | Switch white/black indicator text |
 
-Actions fire after you release the shortcut. Provider and format changes apply
+Actions fire after you release the shortcut. Provider, format, and mode changes apply
 while idle, clear the previous answer, and send no request. On restart, Seth
-reads the starting choices from [config.json](config.json).
+reads the starting choices from [config.json](config.json). The default capture
+mode is Single. For a long question, select Scroll with Ctrl+Shift+S, then press
+Ctrl+D+F. The selected mode appears in the Full indicator.
+
+Scroll mode supports one standard whole-page scroll area, leaving the VM at the
+bottom when finished. It needs an absolute pointing device such as a VirtualBox
+USB Tablet. Its only VM input is button-free wheel scrolling at the page's right
+margin. It checks that the page settles and consecutive sections overlap; it
+stops without inference if coverage cannot be confirmed or a limit is reached.
+The default limit is eight images and 45 seconds of capture. Cancel at any time
+with Ctrl+Shift+G. In Single mode, make the whole question visible before capture.
 
 Successful feedback contains **only the answer keys**. Long lists wrap and stay
 visible until the next capture, selection change, cancellation, or restart.

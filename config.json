@@ -13,7 +13,9 @@
     "screen": 0
   },
   "capture": {
-    "output_dir": "captures"
+    "output_dir": "captures",
+    "mode": "single",
+    "max_frames": 8
   },
   "min_confidence": 0.85,
   "web": {

@@ -14,6 +14,7 @@ SELECT_LETTERS = {18, 19}  # E, R
 COLOR_LETTERS = {16, 17}  # Q, W
 INTERRUPT_LETTERS = {34}  # G
 FORMAT_LETTERS = {44}  # Z
+CAPTURE_LETTERS = {31}  # S
 
 
 class ChordFilter:
@@ -24,7 +25,7 @@ class ChordFilter:
     """
 
     def __init__(self, enable_toggle=False, enable_provider=False, enable_format=False, enable_text_color=False,
-                 enable_interrupt=False):
+                 enable_interrupt=False, enable_capture_mode=False):
         self.down = set()
         self.pending = []
         self.pending_group = None
@@ -42,6 +43,8 @@ class ChordFilter:
             self.bindings[frozenset(COLOR_LETTERS)] = (None, "text_color")
         if enable_interrupt:
             self.bindings[frozenset(INTERRUPT_LETTERS)] = (None, "interrupt")
+        if enable_capture_mode:
+            self.bindings[frozenset(CAPTURE_LETTERS)] = (None, "capture_mode")
         self.letters = set().union(*self.bindings)
         self.chord_keys = CTRL | SHIFT | self.letters
 
@@ -120,13 +123,14 @@ class ChordFilter:
 
 class SethHotkey:
     def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, format_callback=None,
-                 text_color_callback=None, interrupt_callback=None):
+                 text_color_callback=None, interrupt_callback=None, capture_mode_callback=None):
         self.callback = callback
         self.toggle_callback = toggle_callback
         self.provider_callback = provider_callback
         self.format_callback = format_callback
         self.text_color_callback = text_color_callback
         self.interrupt_callback = interrupt_callback
+        self.capture_mode_callback = capture_mode_callback
         self.paths = devices
         self.devices = []
 
@@ -154,6 +158,8 @@ class SethHotkey:
                         required |= COLOR_LETTERS
                     if self.interrupt_callback is not None:
                         required |= INTERRUPT_LETTERS
+                    if self.capture_mode_callback is not None:
+                        required |= CAPTURE_LETTERS
                     if (device.name.startswith("Seth shortcut") or not required <= keys
                             or not keys & CTRL or (self.paths is None and evdev.ecodes.EV_REL in caps)):
                         continue
@@ -166,7 +172,8 @@ class SethHotkey:
                         enable_provider=self.provider_callback is not None,
                         enable_format=self.format_callback is not None,
                         enable_text_color=self.text_color_callback is not None,
-                        enable_interrupt=self.interrupt_callback is not None)))
+                        enable_interrupt=self.interrupt_callback is not None,
+                        enable_capture_mode=self.capture_mode_callback is not None)))
                     LOG.info("Shortcut keyboard: %s (%s)", device.name, path)
                     device = virtual = None
                 finally:
@@ -217,6 +224,9 @@ class SethHotkey:
                     elif fired == "format":
                         accepted = self.format_callback()
                         LOG.info("Ctrl+Shift+Z: %s", "question format changed" if accepted else "busy; switch discarded")
+                    elif fired == "capture_mode":
+                        accepted = self.capture_mode_callback()
+                        LOG.info("Ctrl+Shift+S: %s", "capture mode changed" if accepted else "busy; switch discarded")
                     elif fired == "cycle":
                         accepted = self.callback()
                         LOG.info("Ctrl+D+F: %s", "cycle requested" if accepted else "busy; request discarded")

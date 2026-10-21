@@ -1,4 +1,4 @@
-"""Read-only VM capture, one selected provider, and answer keys in the status bar."""
+"""Single/scroll VM capture, one selected provider, and answer keys in the status bar."""
 
 import argparse
 from dataclasses import asdict
@@ -15,6 +15,7 @@ from capture import SethCapture
 from hotkey import SethHotkey
 from inference import AIError, PROVIDERS, QUESTION_TYPES, QUESTION_LABELS, create_client, parse_decision
 from service_runtime import notify
+from scroll_capture import ScrollCapture
 from settings import load_config
 from trigger import SethTrigger, TriggerError, send_trigger
 from vbox_backend import VMError, VirtualBoxBackend
@@ -23,13 +24,16 @@ LOG = logging.getLogger("seth")
 
 
 class SethEngine:
-    def __init__(self, config=None, *, provider=None, question_type=None):
+    def __init__(self, config=None, *, provider=None, question_type=None, capture_mode=None):
         self.config = config if config is not None else load_config()
         self.threshold = self.config.get("min_confidence", .85)
         if type(self.threshold) not in (int, float) or not math.isfinite(self.threshold) or not 0 <= self.threshold <= 1:
             raise ValueError("min_confidence must be a finite number from 0 to 1.")
         self.selected_provider = provider or self.config.get("provider", "api")
         self.question_type = question_type or self.config.get("question_type", "mc")
+        self.capture_mode = capture_mode or self.config.get("capture", {}).get("mode", "single")
+        if self.capture_mode not in ("single", "scroll"):
+            raise ValueError("Capture mode must be single or scroll.")
         if self.selected_provider not in PROVIDERS or self.question_type not in QUESTION_TYPES:
             raise ValueError("Choose provider api/qwen/gemini and format mc/mcma/table.")
         self.backend = VirtualBoxBackend(self.config)
@@ -42,7 +46,7 @@ class SethEngine:
 
     @property
     def indicator_selection(self):
-        return f"{self.selected_provider.upper() if self.selected_provider == 'api' else self.selected_provider.title()} · {QUESTION_LABELS[self.question_type]}"
+        return f"{self.selected_provider.upper() if self.selected_provider == 'api' else self.selected_provider.title()} · {QUESTION_LABELS[self.question_type]} · {self.capture_mode.title()}"
 
     def _cycle_choice(self, attribute, choices):
         if self.stop_event.is_set() or not self._cycle_lock.acquire(blocking=False):
@@ -60,6 +64,9 @@ class SethEngine:
 
     def cycle_question_type(self):
         return self._cycle_choice("question_type", QUESTION_TYPES)
+
+    def cycle_capture_mode(self):
+        return self._cycle_choice("capture_mode", ("single", "scroll"))
 
     def _begin(self):
         if self.stop_event.is_set() or not self._cycle_lock.acquire(blocking=False):
@@ -107,7 +114,7 @@ class SethEngine:
 
     def _execute_cycle(self):
         started, timings = time.perf_counter(), {}
-        frame, decision = None, None
+        frame, decision, frames = None, None, ()
         try:
             client = create_client(self.config, self.selected_provider, stop_event=self.cancel_event,
                                    progress=lambda label: setattr(self, "progress", ("thinking", label)))
@@ -115,13 +122,21 @@ class SethEngine:
             self.progress = ("capturing", "Capturing")
             if self.cancel_event.is_set():
                 raise AIError("Capture cancelled.", "cancelled")
-            frame = self.capture.capture_frame()
+            if self.capture_mode == "scroll":
+                frames = ScrollCapture(self.capture, self.config, self.cancel_event,
+                                       lambda label: setattr(self, "progress", ("capturing", label))).run()
+            else:
+                frames = (self.capture.capture_frame(),)
+            frame = frames[0]
             if self.cancel_event.is_set():
                 raise AIError("Capture cancelled.", "cancelled")
             timings["capture_s"] = round(time.perf_counter() - started, 3)
             stage = time.perf_counter()
             self.progress = ("thinking", "Waiting")
-            raw = client.analyze_screenshot(frame.path, self.question_type)
+            if self.capture_mode == "scroll":
+                raw = client.analyze_screenshots([part.path for part in frames], self.question_type)
+            else:
+                raw = client.analyze_screenshot(frame.path, self.question_type)
             if self.cancel_event.is_set():
                 raise AIError("Inference cancelled.", "cancelled")
             timings["inference_s"] = round(time.perf_counter() - stage, 3)
@@ -143,6 +158,7 @@ class SethEngine:
             result.update(status="cancelled", error_code="cancelled")
         if frame is not None:
             result["capture_path"] = str(frame.path)
+            result["capture_paths"] = [str(part.path) for part in frames]
         status = result["status"]
         label = (decision["answer"] if status == "answer" else
                  "Error: " + result["error"] if status == "error" else
@@ -150,7 +166,8 @@ class SethEngine:
                   "cancelled": "Cancelled"}[status])
         self.progress = ("done" if status == "answer" else status, label)
         timings["total_s"] = round(time.perf_counter() - started, 3)
-        result.update(provider=self.selected_provider, question_type=self.question_type, timings=timings)
+        result.update(provider=self.selected_provider, question_type=self.question_type,
+                      capture_mode=self.capture_mode, timings=timings)
         LOG.info("Cycle finished: %s", json.dumps(result))
         return result
 
@@ -166,6 +183,7 @@ def main():
                         help="Run once (default), serve/trigger the listener, inspect VM status, or save a capture")
     parser.add_argument("--provider", choices=PROVIDERS, help="Provider for once/listen; otherwise use config")
     parser.add_argument("--question-type", choices=QUESTION_TYPES, help="Manual question format for once/listen")
+    parser.add_argument("--capture-mode", choices=("single", "scroll"), help="Capture one screen or scroll the whole page")
     parser.add_argument("--hotkey", action="store_true", help="Enable host shortcuts in listen mode")
     parser.add_argument("--overlay", action="store_true", help="Show the status bar with --hotkey")
     args = parser.parse_args()
@@ -176,22 +194,24 @@ def main():
     backend = None
     try:
         config = load_config(args.config)
-        if args.mode in ("status", "capture"):
+        if args.mode == "status":
             backend = VirtualBoxBackend(config)
-            if args.mode == "status":
-                result = backend.status()
-            else:
-                frame = SethCapture(config, backend).capture_frame()
-                result = {"path": str(frame.path), "display": asdict(frame.display)}
+            result = backend.status()
             print(json.dumps(result))
             return 0
         if args.mode == "trigger":
             result = send_trigger(config["project_dir"])
             print(result)
             return 0 if result == "accepted" else 2
-        engine = SethEngine(config, provider=args.provider, question_type=args.question_type)
+        engine = SethEngine(config, provider=args.provider, question_type=args.question_type, capture_mode=args.capture_mode)
         signal.signal(signal.SIGINT, lambda *_: engine.stop_event.set())
         signal.signal(signal.SIGTERM, lambda *_: engine.stop_event.set())
+        if args.mode == "capture":
+            frames = (ScrollCapture(engine.capture, config, engine.cancel_event).run() if engine.capture_mode == "scroll"
+                      else (engine.capture.capture_frame(),))
+            print(json.dumps({"path": str(frames[0].path), "paths": [str(frame.path) for frame in frames],
+                              "display": asdict(frames[0].display)}))
+            return 0
         if args.mode == "once":
             result = engine.run_cycle()
             print(json.dumps(result))
@@ -208,11 +228,12 @@ def main():
                 hotkey = SethHotkey(engine.request_cycle, config.get("hotkey", {}).get("devices"),
                                     provider_callback=engine.cycle_provider,
                                     format_callback=engine.cycle_question_type,
+                                    capture_mode_callback=engine.cycle_capture_mode,
                                     interrupt_callback=engine.interrupt_cycle,
                                     toggle_callback=overlay.toggle if overlay else None,
                                     text_color_callback=overlay.toggle_text_color if overlay else None)
                 hotkey.start()
-            LOG.info("Ready (capture and display only): Ctrl+D+F capture; Ctrl+E+R API/Qwen/Gemini; Ctrl+Shift+Z MC/MCMA/Table; Ctrl+Shift+G cancel.")
+            LOG.info("Ready: Ctrl+D+F capture; Ctrl+E+R API/Qwen/Gemini; Ctrl+Shift+Z MC/MCMA/Table; Ctrl+Shift+S Single/Scroll; Ctrl+Shift+G cancel. No answer input.")
             def poll():
                 if hotkey:
                     hotkey.poll()

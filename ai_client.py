@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from inference import AIError, build_prompt, screenshot_info
+from inference import AIError, build_prompt, image_batch, screenshot_info
 
 from settings import load_config
 
@@ -63,17 +63,24 @@ class SethAIClient:
             raise AIError("api.stream must be true or false.")
 
     def analyze_screenshot(self, image_path, question_type):
+        return self.analyze_screenshots([image_path], question_type)
+
+    def analyze_screenshots(self, image_paths, question_type):
         self.validate_config()
-        with open(image_path, "rb") as stream:
-            data = stream.read()
-        _, mime = screenshot_info(io.BytesIO(data))
+        paths = image_batch(image_paths)
+        content = [{"type": "text", "text": build_prompt(question_type, len(paths))}]
+        for index, path in enumerate(paths, 1):
+            with path.open("rb") as stream:
+                data = stream.read()
+            _, mime = screenshot_info(io.BytesIO(data))
+            if len(paths) > 1:
+                content.append({"type": "text", "text": f"Section {index} of {len(paths)} (top to bottom)"})
+            content.append({"type": "image_url", "image_url": {
+                "url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")}})
         payload = {
             "model": self.api["model"],
             "stream": self.api.get("stream", False),
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": build_prompt(question_type)},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")}},
-            ]}],
+            "messages": [{"role": "user", "content": content}],
         }
         fmt = self.api.get("response_format")
         if fmt:

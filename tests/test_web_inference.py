@@ -61,7 +61,7 @@ FIXTURE = r'''<!doctype html><html><body>
 <button id=send disabled>Send</button>
 <script>
 const scenario=SCENARIO;
-const answer=JSON.stringify({status:'answer',confidence:0.99,answer:'2'});
+const answer=JSON.stringify({status:'answer',confidence:0.99,answer:scenario==='batch'?'L, R, L':'2'});
 window.submissions=0;window.attachmentRemovals=0;
 document.querySelector('#new-chat').onclick=()=>{
  document.querySelectorAll('.user,.response,#stop').forEach(e=>e.remove());
@@ -88,6 +88,7 @@ if(scenario==='stale')document.body.insertAdjacentHTML('beforeend','<div class=r
 document.querySelector('#file').onchange=async()=>{
  const file=document.querySelector('#file').files[0];
  const preview=document.createElement('div');preview.className='attachment';
+ preview.dataset.filename=file.name;
  preview.textContent=scenario==='wrong_file'?'other.png':file.name;
  if(scenario==='suffix'||scenario==='jpeg_suffix'||scenario==='draft_persists'){
    preview.textContent='';preview.setAttribute('aria-describedby','preview-description');
@@ -97,6 +98,7 @@ document.querySelector('#file').onchange=async()=>{
  const remove=document.createElement('button');remove.className='remove';remove.textContent='Remove attachment';
  remove.onclick=()=>{window.attachmentRemovals++;preview.remove();};preview.append(document.createTextNode(' '),remove);
  preview.insertAdjacentHTML('beforeend','<span class=uploading>Uploading</span>');
+ if(scenario==='batch_drop')document.querySelectorAll('.attachment').forEach(e=>e.remove());
  document.body.append(preview);
  const result=await fetch('/upload',{method:'POST',body:file});
  if(!result.ok||scenario==='upload_error'){
@@ -108,6 +110,7 @@ document.querySelector('#file').onchange=async()=>{
 };
 document.querySelector('#send').onclick=()=>{
  window.submissions++;
+ window.submittedFiles=Array.from(document.querySelectorAll('.attachment')).map(e=>e.dataset.filename);
  const user=document.createElement('div');user.className='user';
  user.textContent=scenario==='wrong_turn'?'Unrelated request':document.querySelector('#editor').textContent;
  document.body.append(user);
@@ -157,6 +160,27 @@ TEST_SELECTORS = {
 
 @unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1", "Set SETH_CHROMIUM_TESTS=1 for offline Chromium integration")
 class ChromiumIntegrationTests(unittest.TestCase):
+    def test_ordered_batch_uploads_every_image_before_one_submission(self):
+        paths = [self.root / f"section_{n}.png" for n in range(3)]
+        for n, path in enumerate(paths):
+            Image.new("RGB", (320, 200), (n * 80, 20, 40)).save(path)
+        before = len(self.uploads)
+        with self.browser(timeout=15) as page:
+            raw = self.adapter("batch").exchange(page, paths, build_prompt("table", 3), lambda _: None)
+            self.assertEqual(parse_decision(raw, "table")["answer"], "L, R, L")
+            self.assertEqual(page.evaluate("window.submissions"), 1)
+            self.assertEqual(page.evaluate("window.submittedFiles"), [path.name for path in paths])
+        self.assertEqual(self.uploads[before:], [path.read_bytes() for path in paths])
+
+    def test_replaced_earlier_attachment_prevents_submission(self):
+        second = self.root / "second.png"
+        Image.new("RGB", (320, 200), "red").save(second)
+        with self.browser(timeout=15) as page:
+            with self.assertRaises(AIError) as caught:
+                self.adapter("batch_drop").exchange(page, [self.image, second], "One question", lambda _: None)
+            self.assertEqual(caught.exception.code, "browser_layout")
+            self.assertEqual(page.evaluate("window.submissions"), 0)
+
     @classmethod
     def setUpClass(cls):
         cls.uploads = []

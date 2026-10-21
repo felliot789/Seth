@@ -101,7 +101,7 @@ class LaunchTests(unittest.TestCase):
     def test_doctor_reads_keyboard_capabilities_without_grabbing_or_reading_events(self):
         import evdev
         keyboard = SimpleNamespace(name="Physical keyboard", close=Mock(), capabilities=lambda: {
-            evdev.ecodes.EV_KEY: [97, 32, 33, 18, 19, 16, 17, 34, 44]})
+            evdev.ecodes.EV_KEY: [97, 32, 33, 18, 19, 16, 17, 34, 44, 31]})
         status = {"services": {"listener": {"ActiveState": "active"}},
                   "providers": {"qwen": {"status": "ready", "detail": ""}},
                   "api": {"status": "reachable", "detail": ""}}

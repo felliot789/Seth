@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from chromium_runtime import Chromium, find_chromium
-from inference import AIError, build_prompt, screenshot_info
+from inference import AIError, build_prompt, image_batch, screenshot_info
 from settings import load_config
 
 LOG = logging.getLogger("seth")
@@ -174,10 +174,18 @@ return {url:location.href,editors:all(s.editor).length,
         # Gemini can retain an unsent attachment even when New chat is clicked.
         # Clear that one draft explicitly; never submit it or duplicate an upload.
         if starting_new and self.name == "gemini" and state["attachments"]:
-            if len(state["attachments"]) != 1:
-                raise AIError(f"{self.name}: expected one pending draft attachment.", "browser_layout")
-            self.reveal_draft_remove(page)
-            self.click(page, self.selectors["remove_attachment"])
+            if len(state["attachments"]) > 16:
+                raise AIError(f"{self.name}: too many pending draft attachments.", "browser_layout")
+            while state["attachments"]:
+                count = len(state["attachments"])
+                self.reveal_draft_remove(page)
+                removed = dom(page, """
+const buttons=all(args[0]);if(!buttons.length)return false;
+buttons[0].click();return true;
+""", self.selectors["remove_attachment"])
+                if not removed:
+                    raise AIError(f"{self.name}: pending attachment removal is unavailable.", "browser_layout")
+                state = self.wait_state(page, lambda s: len(s["attachments"]) == count - 1)
             self.fill_composer(page, "")
             state = self.wait_state(page, lambda s: s["editors"] and s["modelCount"]
                                     and not (s["users"] or s["responses"] or s["attachments"]))
@@ -191,7 +199,7 @@ return {url:location.href,editors:all(s.editor).length,
         if dom(page, "return all(args[0]).length;", selector) != 0:
             return
         position = dom(page, """
-const e=all(args[0]);if(e.length!==1)return null;
+const e=all(args[0]);if(!e.length)return null;
 const b=e[0].getBoundingClientRect();
 return b.width>0&&b.height>0?{x:b.x+b.width/2,y:b.y+b.height/2}:null;
 """, self.selectors["attachment"])
@@ -217,7 +225,7 @@ matches[0].click();return true;
         if not result:
             raise AIError(f"{self.name}: a required page control is missing, ambiguous, or disabled.", "browser_layout")
 
-    def attach(self, page, image_path):
+    def attach(self, page, image_path, previous=()):
         def select_input():
             return dom(page, """
 const inputs=Array.from(document.querySelectorAll(args[0]));
@@ -241,12 +249,20 @@ inputs[0].setAttribute('data-seth-upload',args[1]);return '[data-seth-upload="'+
                 self.click(page, self.selectors["upload_item"], upload_text)
                 selector = page.wait(select_input)
         page.set_file(selector, image_path)
-        self.wait_attachment(page, image_path)
+        self.wait_attachment(page, image_path, previous)
 
-    def wait_attachment(self, page, image_path):
-        state = self.wait_state(page, lambda s: len(s["attachments"]) == 1
-                                and self.attachment_matches(s["attachments"][0], image_path)
-                                and not s["uploading"] and s["send"])
+    def has_batch(self, state, paths):
+        return len(state["attachments"]) == len(paths) and all(
+            self.attachment_matches(label, path) for label, path in zip(state["attachments"], paths))
+
+    def wait_attachment(self, page, image_path, previous=()):
+        def ready(state):
+            if previous and not state["uploading"] and state["send"] and any(
+                    self.attachment_matches(label, image_path) for label in state["attachments"]):
+                if not self.has_batch(state, (*previous, image_path)):
+                    raise AIError(f"{self.name}: screenshot batch is missing sections or out of order; nothing sent.", "browser_layout")
+            return self.has_batch(state, (*previous, image_path)) and not state["uploading"] and state["send"]
+        state = self.wait_state(page, ready)
         self.verify_model(state)
 
     def attachment_matches(self, label, image_path):
@@ -277,15 +293,18 @@ return true;
             raise AIError(f"{self.name}: prompt composer is missing or ambiguous.", "browser_layout")
 
     def exchange(self, page, image_path, prompt, report):
+        paths = image_batch(image_path)
         self.prepare(page)
         request_id = "Seth request " + uuid.uuid4().hex
         self.fill_composer(page, request_id + "\n" + prompt)
         report(f"Uploading to {self.name}")
-        self.attach(page, image_path)
+        for index, path in enumerate(paths):
+            report(f"Uploading {index + 1}/{len(paths)} to {self.name}")
+            self.attach(page, path, paths[:index])
         state = self.snapshot(page)
         self.check_state(state)
         self.verify_model(state)
-        if state["users"] or state["responses"] or len(state["attachments"]) != 1 or not state["send"]:
+        if state["users"] or state["responses"] or not self.has_batch(state, paths) or state["uploading"] or not state["send"]:
             raise AIError(f"{self.name}: page changed before submission.", "browser_layout")
         # Never retry a submission to this provider after an ambiguous failure.
         self.click(page, self.selectors["send"])
@@ -360,7 +379,7 @@ class QwenSiteAdapter(SiteAdapter):
 
         page.wait(ready)
 
-    def attach(self, page, image_path):
+    def attach(self, page, image_path, previous=()):
         # The hidden input is always present, but Qwen arms its one-shot upload
         # handler only when Upload attachment is selected, on every upload.
         upload_text = self.options.get("upload_text", "Upload attachment")
@@ -386,7 +405,7 @@ class QwenSiteAdapter(SiteAdapter):
 
             page.wait(choose_upload)
             page.set_chooser_file(image_path)
-            self.wait_attachment(page, image_path)
+            self.wait_attachment(page, image_path, previous)
 
     def exchange(self, page, image_path, prompt, report):
         raw = super().exchange(page, image_path, prompt, report)
@@ -482,7 +501,18 @@ class WebInferenceClient:
                 return operation(self.adapter(provider), browser)
 
     def analyze_screenshot(self, image_path, question_type):
-        image_path = Path(image_path).resolve()
-        screenshot_info(image_path)
-        prompt = build_prompt(question_type)
-        return self._run(lambda adapter, page: adapter.exchange(page, image_path, prompt, self._report))
+        return self.analyze_screenshots([image_path], question_type)
+
+    def analyze_screenshots(self, image_paths, question_type):
+        paths = image_batch(image_paths)
+        if len({path.name for path in paths}) != len(paths):
+            raise AIError("Web screenshot filenames must be distinct.")
+        for path in paths:
+            screenshot_info(path)
+        prompt = build_prompt(question_type, len(paths))
+        if len(paths) > 1:
+            prompt += "\nCapture order (top to bottom):\n" + "\n".join(
+                f"{index}: {path.name}" for index, path in enumerate(paths, 1))
+        # Preserve the single-image adapter call used by existing clients.
+        images = paths if len(paths) > 1 else paths[0]
+        return self._run(lambda adapter, page: adapter.exchange(page, images, prompt, self._report))

@@ -16,6 +16,11 @@ reachability check; it does not validate credentials or perform model inference.
 | No response to the shortcut | Release every chord key. Check the listener, keyboard device permissions, and `/dev/uinput` access. Follow [shortcut setup](setup.md#shortcut-permissions). |
 | Indicator is invisible or only a dot | Cycle Ctrl+Shift+D+F to Full mode. Ctrl+Shift+Q+W changes text color. On Wayland, check XWayland and the desktop environment used to start Seth. |
 | Wrong provider or question format | Select it while idle with Ctrl+E+R or Ctrl+Shift+Z. Changes during a running request are ignored. Startup choices come from the configuration. |
+| Long question is cut off | Use Ctrl+Shift+S to select Scroll, then Ctrl+D+F. Keep one question in one whole-page scroll area. |
+| Scroll overlap/settling error | Wait for loading/animation to finish and retry. Reduce guest wheel speed or use Single mode with the question fitted on screen. No incomplete batch is sent. |
+| Scroll image/time limit | Capture is capped at `capture.max_frames` images and 45 seconds. Fit more of the question using browser zoom, or raise the image limit up to 16 if the provider accepts it. |
+| Scroll needs an absolute pointing device | Check the VM's pointing device in VirtualBox. Scroll uses absolute mouse positioning; Single does not. |
+| Screenshot batch missing/out of order | The provider upload did not retain every section in order. Inspect its tab and retry; Seth does not submit a partial batch. |
 | `Uncertain` | Make the complete question and options legible, confirm the format, and capture again. You can manually try another provider. |
 | `No answer` | The capture may show a loading screen, sign-in, or no complete question. Prepare the screen before triggering. |
 | VM not found or capture error | Check `vm.name`/`vm.uuid`, the running VM, monitor index, and host SDK access under the same user. `main.py --mode status` checks metadata. |
