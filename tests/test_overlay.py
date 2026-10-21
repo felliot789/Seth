@@ -67,9 +67,9 @@ class OverlayTests(unittest.TestCase):
         overlay = self.overlay
         overlay.toggle()
         overlay.toggle()
-        for state in ('capturing', 'thinking', 'selecting', 'done', 'low_confidence', 'no_action', 'error'):
+        for state in ('capturing', 'thinking', 'done', 'uncertain', 'no_action', 'error'):
             with self.subTest(state=state):
-                overlay.poll((state, state), 'Gemini · Scroll')
+                overlay.poll((state, state), 'Gemini · Table')
                 self.assertEqual(overlay.display_mode, 'dot')
                 self.assertFalse(overlay.label.isVisible())
                 self.assertFalse(overlay.panel.isVisible())
@@ -82,14 +82,14 @@ class OverlayTests(unittest.TestCase):
         self.assertLess(image.pixelColor(14, 17).alpha(), 255)
         self.assertEqual(image.pixelColor(13, 18).alpha(), 0)
         self.assertEqual(image.pixelColor(17, 18).alpha(), 0)
-        self.assertNotEqual(COLORS['thinking'], COLORS['low_confidence'])
+        self.assertNotEqual(COLORS['thinking'], COLORS['uncertain'])
 
     def test_full_text_has_no_background_or_border_in_either_color(self):
         overlay = self.overlay
         for color in ('white', 'black'):
             if overlay.text_color != color:
                 overlay.toggle_text_color()
-            overlay.poll(('done', 'Done'), 'Gemini · Scroll')
+            overlay.poll(('done', 'Done'), 'Gemini · Table')
             image = overlay.window.grab().toImage()
             for point in ((0, 0), (0, 19), (100, 3), (100, 34), (312, 19), (335, 37)):
                 self.assertEqual(image.pixelColor(*point).alpha(), 0, (color, point))
@@ -100,7 +100,7 @@ class OverlayTests(unittest.TestCase):
 
     def test_text_color_toggle_preserves_display_mode_status_and_dot(self):
         overlay = self.overlay
-        overlay.poll(('thinking', 'Waiting'), 'Qwen · Scroll')
+        overlay.poll(('thinking', 'Waiting'), 'Qwen · Table')
         progress, dot = overlay.progress, overlay.dot.styleSheet()
         for mode in ('full', 'hidden', 'dot'):
             overlay.display_mode = mode
@@ -116,11 +116,20 @@ class OverlayTests(unittest.TestCase):
 
     def test_full_shows_both_selections_and_preserves_result_colour_on_a_switch(self):
         overlay = self.overlay
-        overlay.poll(('done', 'Done'), 'API · Single')
+        overlay.poll(('done', 'Done'), 'API · MC')
         colour = overlay.dot.styleSheet()
-        overlay.poll(('done', 'Done'), 'Qwen · Scroll')
-        self.assertEqual(overlay.label.text(), 'Seth · Qwen · Scroll · Done')
+        overlay.poll(('done', 'Done'), 'Qwen · Table')
+        self.assertEqual(overlay.label.text(), 'Done')
         self.assertEqual(overlay.dot.styleSheet(), colour)
+
+    def test_answer_keys_are_plain_and_complete_without_prefix_or_clipping(self):
+        overlay = self.overlay
+        for keys in ("2", "1, 3, 5", "L, R, L, R, R", ", ".join(str(i) for i in range(1, 65))):
+            overlay.poll(("done", keys), "API · MCMA")
+            self.assertEqual(overlay.label.text(), keys)
+            self.assertEqual(overlay.label.textFormat(), Qt.TextFormat.PlainText)
+            self.assertGreaterEqual(overlay.label.height(), overlay.label.heightForWidth(overlay.label.width()))
+            self.assertLessEqual(overlay.window.width(), overlay.app.primaryScreen().availableGeometry().width() - 32)
 
     def test_visibility_toggle_preserves_latest_progress_without_showing(self):
         overlay = self.overlay
@@ -132,7 +141,7 @@ class OverlayTests(unittest.TestCase):
         overlay.toggle()
         overlay.poll(("done", "Done"))
         self.assertTrue(overlay.window.isVisible())
-        self.assertEqual(overlay.label.text(), "Seth · Done")
+        self.assertEqual(overlay.label.text(), "Done")
 
     def test_wait_timer_advances_and_resets_for_next_request(self):
         overlay = self.overlay

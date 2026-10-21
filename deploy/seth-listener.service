@@ -8,7 +8,7 @@ StartLimitIntervalSec=0
 Type=notify
 NotifyAccess=main
 WorkingDirectory=@ROOT@
-ExecStart=@PYTHON@ @MAIN@ --config @CONFIG@ --mode listen --execute --hotkey --overlay
+ExecStart=@PYTHON@ @MAIN@ --config @CONFIG@ --mode listen --hotkey --overlay
 Environment=PYTHONUNBUFFERED=1 SETH_MANAGED_BROWSER=1
 Restart=on-failure
 RestartSec=5

@@ -1,7 +1,6 @@
 {
-  "inference": {
-    "backend": "web"
-  },
+  "provider": "api",
+  "question_type": "table",
   "api": {
     "base_url": "",
     "model": "",
@@ -14,34 +13,18 @@
     "screen": 0
   },
   "capture": {
-    "output_dir": "captures",
-    "max_age_seconds": 300,
-    "scroll_context": {
-      "enabled": false,
-      "layout": "auto",
-      "scroll_method": "wheel",
-      "max_views": 32
-    }
-  },
-  "clicker": {
-    "delay_ms": [200, 800]
+    "output_dir": "captures"
   },
   "min_confidence": 0.85,
   "web": {
-    "providers": ["qwen"],
     "timeout_seconds": 240,
-    "attempt_timeout_seconds": 240,
     "sites": {
       "gemini": {
-        "engine": "chromium",
         "browser_profile": "qwen",
-        "keep_browser_open": true,
         "model_label": "Argon High",
         "thinking_label": ""
       },
       "qwen": {
-        "engine": "chromium",
-        "keep_browser_open": true,
         "model_label": "Qwen3.8-Max",
         "thinking_label": "Thinking"
       }

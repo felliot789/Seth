@@ -85,8 +85,8 @@ class SethTrigger:
             return
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
             raise TriggerError("Refusing to replace a host trigger path that is not your socket.")
-        # The process lock prevents competing new listeners. A connect-only probe
-        # also protects listeners from older versions, without requesting a cycle.
+        # Protect a live socket even if its owner does not hold our process lock.
+        # A connect-only probe never requests a cycle.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
             probe.settimeout(0.2)
             try:

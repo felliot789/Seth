@@ -1,4 +1,4 @@
-"""Offline Lightpanda tests: local HTTP only, no real provider or VM calls."""
+"""Offline Chromium tests: local HTTP only, no real provider or VM calls."""
 
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,404 +17,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image, ImageDraw
 from ai_client import SethAIClient
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
-from gemini_web import GeminiWebClient
-from inference import AIError, build_prompt, create_client
-from lightpanda_runtime import DEFAULT_BINARY, Lightpanda, write_private_json
+from inference import AIError, build_prompt, parse_decision, create_client
+from cdp import write_private_json
 from web_inference import SITES, SiteAdapter, WebInferenceClient
 
 
 class WebClientTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.image = self.root / "question.png"
-        Image.new("RGB", (320, 200), "white").save(self.image)
-        self.config = {"inference": {"backend": "web"}, "web": {
-            "state_dir": str(self.root / "state"), "executable_path": sys.executable,
-            "providers": ["gemini", "chatgpt", "qwen"],
-            "timeout_seconds": 20, "attempt_timeout_seconds": 10,
-            "sites": {provider: {"model_label": "Pro"} for provider in SITES}}}
-        self.client = WebInferenceClient(self.config)
-        for provider in self.config["web"]["providers"]:
-            write_private_json(self.client.cookie_file(provider), [])
+    def test_selected_provider_sends_original_bytes_and_never_hands_off(self):
+        for provider in ("qwen", "gemini"):
+            with tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "question.png"
+                Image.new("RGB", (320, 200), "white").save(path)
+                client = WebInferenceClient({}, provider=provider)
+                expected = '{"status":"uncertain","confidence":0.2,"answer":""}'
+                seen = []
+                def run(operation):
+                    adapter = MagicMock()
+                    adapter.exchange.side_effect = lambda page, upload, prompt, report: (
+                        seen.append((upload.read_bytes(), prompt)) or expected)
+                    return operation(adapter, object())
+                with patch.object(client, "_run", side_effect=run) as operation:
+                    self.assertEqual(client.analyze_screenshot(path, "table"), expected)
+                    operation.assert_called_once()
+                self.assertEqual(client.provider, provider)
+                self.assertEqual(seen[0][0], path.read_bytes())
+                self.assertIn("L or R", seen[0][1])
+                self.assertNotIn("target_id", seen[0][1])
 
-    def test_factory_and_gemini_alias(self):
-        self.assertIsInstance(create_client({}), SethAIClient)
-        self.assertIsInstance(create_client(self.config), WebInferenceClient)
-        alias = create_client(self.config | {"inference": {"backend": "gemini_web"}})
-        self.assertIsInstance(alias, GeminiWebClient)
-        self.assertEqual(alias.web["providers"], ["gemini"])
-        self.assertEqual(self.config["web"]["providers"], ["gemini", "chatgpt", "qwen"])
-        with self.assertRaises(AIError):
-            create_client({"inference": {"backend": "typo"}})
-
-    def test_browser_validation_needs_no_api_credentials(self):
-        self.client.validate_config()
-        for field, value in (("timeout_seconds", 0), ("timeout_seconds", float("nan")),
-                             ("attempt_timeout_seconds", 301), ("providers", []),
-                             ("providers", ["gemini", "gemini"]), ("providers", ["unknown"])):
-            with self.subTest(field=field, value=value), self.assertRaises(AIError):
-                WebInferenceClient({"web": self.config["web"] | {field: value}}).validate_config()
-
-    def test_shared_native_profile_keeps_provider_tabs_and_cookie_files_separate(self):
-        client = WebInferenceClient({'web': self.config['web'] | {'providers':['gemini','qwen'],
-            'sites': {'gemini': {'engine':'chromium','browser_profile':'qwen','model_label':'Argon'},
-                      'qwen': {'engine':'chromium','model_label':'Qwen3.8-Omni-Flash'}}}})
-        with patch('web_inference.find_chromium', return_value=sys.executable):
-            client.validate_config()
-        self.assertEqual(client.login_profile('gemini'), client.login_profile('qwen'))
-        self.assertNotEqual(client.native_state_file('gemini'), client.native_state_file('qwen'))
-        self.assertNotEqual(client.cookie_file('gemini'), client.cookie_file('qwen'))
-        for value in ('../elsewhere', '', None, [], 1):
-            client.web['sites']['gemini']['browser_profile'] = value
-            with self.subTest(profile=value), self.assertRaises(AIError):
-                client.validate_config()
-        client.web['sites']['gemini'].update(browser_profile='qwen', engine='lightpanda')
-        with self.assertRaises(AIError):
-            client.validate_config()
-
-    def test_only_configured_engines_need_installed_binaries(self):
-        self.client.web["executable_path"] = "/nonexistent/lightpanda"
-        self.client.web["sites"] = {"gemini": {"engine": "chromium", "model_label": "Argon"}}
-        with patch("web_inference.find_chromium", return_value=sys.executable):
-            self.client.validate_config()
-        self.client.web["sites"]["gemini"]["engine"] = "unknown"
-        with self.assertRaises(AIError):
-            self.client.validate_config()
-
-    def test_gemini_and_qwen_preview_conversion_preserves_exact_source_identity(self):
-        for provider in ('gemini','qwen'):
-            adapter = SiteAdapter(provider)
-            for source in (self.image, self.image.with_suffix('.jpg'), self.image.with_suffix('.jpeg'), self.image.with_suffix('.PNG')):
-                for label in ('question.png', 'Preview question_456f82.png close attachment',
-                              'question.jpg', 'question_16fa84.jpg', 'question_456f82.jpeg', 'question_456f82.JPG'):
-                    with self.subTest(provider=provider,source=source.name,label=label):
-                        self.assertTrue(adapter.attachment_matches(label, source))
-                for label in ('other.png', 'otherquestion_456f82.jpg', 'question.png.extra',
-                              'question_wrong.png', 'question_zzzzzz.png', 'question_12345.jpg',
-                              'question_456f82.jpg.extra', 'question_456f82_more.jpg', 'question_456f82.webp'):
-                    with self.subTest(provider=provider,source=source.name,label=label):
-                        self.assertFalse(adapter.attachment_matches(label, source))
-        for label in ('question_456f82.png','question_456f82.jpg','question.jpg'):
-            self.assertFalse(SiteAdapter('chatgpt').attachment_matches(label, self.image))
-
-    def test_selected_model_and_thinking_level_must_both_match(self):
-        adapter = SiteAdapter("gemini", {"model_label": "Argon", "thinking_label": "Medium"})
-        adapter.verify_model({"modelCount": 1, "model": "ArgonMedium Open mode picker, currently Argon Medium"})
-        for model in ("Argon High", "Flash Medium", "Argon MediumPlus"):
-            with self.subTest(model=model), self.assertRaises(AIError) as caught:
-                adapter.verify_model({"modelCount": 1, "model": model})
-            self.assertEqual(caught.exception.code, "browser_model")
-
-    def test_qwen_requires_one_matching_separate_thinking_control(self):
-        adapter = SiteAdapter("qwen", {"model_label": "Qwen3.7-Plus", "thinking_label": "Thinking"})
-        state = {"modelCount": 1, "model": "Qwen3.7-Plus", "thinkCount": 1, "thinking": "Thinking"}
-        adapter.verify_model(state)
-        for change in ({"thinking": "Fast"}, {"thinking": "ThinkingPlus"},
-                       {"thinking": ""}, {"thinking": "   "},
-                       {"thinkCount": 0}, {"thinkCount": 2}, {"model": "Other Model"}):
-            with self.subTest(change=change), self.assertRaises(AIError) as caught:
-                adapter.verify_model(state | change)
-            self.assertEqual(caught.exception.code, "browser_model")
-        # A model label mentioning Thinking cannot substitute for the separate control.
-        with self.assertRaises(AIError) as caught:
-            adapter.verify_model({"modelCount": 1, "model": "Qwen3.7-Plus Thinking"})
-        self.assertEqual(caught.exception.code, "browser_model")
-
-    def test_qwen_unconfigured_thinking_does_not_require_a_control(self):
-        adapter = SiteAdapter("qwen", {"model_label": "Qwen3.7-Plus", "thinking_label": ""})
-        adapter.verify_model({"modelCount": 1, "model": "Qwen3.7-Plus"})
-
-    def test_fallback_is_ordered_and_each_provider_is_attempted_once(self):
-        calls, deadlines = [], []
-        raw = '{"action":"none"}'
-        def run(provider, deadline, operation):
-            calls.append(provider)
-            deadlines.append(deadline)
-            if provider == "gemini":
-                raise AIError("Quota", "browser_limit")
-            return raw
-        with patch.object(self.client, "_run", side_effect=run):
-            self.assertEqual(self.client.analyze_screenshot(self.image), raw)
-        self.assertEqual(calls, ["gemini", "chatgpt"])
-        self.assertEqual(self.client.last_provider, "chatgpt")
-        self.assertEqual(self.client.last_attempts, [{"provider": "gemini", "error_code": "browser_limit"}])
-
-    def test_invalid_answer_falls_back_without_exposing_it_to_clicking(self):
-        with patch.object(self.client, "_run", side_effect=['{"action":"click"}', '{"action":"none"}']) as run:
-            self.assertEqual(self.client.analyze_screenshot(self.image), '{"action":"none"}')
-            self.assertEqual(run.call_count, 2)
-        self.assertEqual(self.client.last_provider, "chatgpt")
-
-    def test_scroll_context_skips_unsupported_sites_and_keeps_original_live_coordinates(self):
-        self.client.web['providers'] = ['chatgpt', 'qwen']
-        with Image.open(self.image) as image:
-            draw = ImageDraw.Draw(image)
-            draw.ellipse((169, 89, 190, 110), outline="#aaa", width=2)
-            draw.rectangle((20, 170, 33, 183), outline="#aaa", width=2)
-            image.save(self.image)
-        original = self.image.read_bytes()
-        contexts = [{"path": self.image, "box": (0, 0, 160, 80), "label": "Top of question"}]
-        uploads = []
-        def run(provider, deadline, operation):
-            self.assertEqual(provider, "qwen")
-            adapter = MagicMock()
-            def exchange(page, upload, prompt, report):
-                uploads.append(upload)
-                with Image.open(upload) as image:
-                    self.assertEqual(image.width, 320)
-                    self.assertGreater(image.height, 200)
-                self.assertIn("one question across scroll captures", prompt)
-                self.assertIn("Only answer controls in the bottom LIVE ANSWER VIEW are selectable", prompt)
-                self.assertIn("coordinate_space", prompt)
-                self.assertNotIn("target_id", prompt)
-                return '{"action":"click","coordinate_space":"pixels","click_x":180,"click_y":264,"confidence":0.95,"explanation":"B"}'
-            adapter.exchange.side_effect = exchange
-            return operation(adapter, None)
-        with patch.object(self.client, "_run", side_effect=run):
-            raw = self.client.analyze_screenshot(self.image, context_images=contexts,
-                                                 control_regions=[(160, 40, 240, 150)])
-        result = json.loads(raw)
-        self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
-        self.assertEqual(self.client.last_provider, "qwen")
-        self.assertEqual(self.client.last_attempts, [{"provider": "chatgpt", "error_code": "browser_context"}])
-        self.assertEqual(self.image.read_bytes(), original)
-        self.assertFalse(uploads[0].exists())
-
-    def test_gemini_scroll_context_maps_uploaded_coordinates_to_live_pixels(self):
-        self.client.web['providers'] = ['gemini']
-        with Image.open(self.image) as image:
-            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
-            image.save(self.image)
-        contexts = [{'path': self.image, 'box': (0, 0, 160, 80), 'label': 'Question top'}]
-        uploads = []
-        def run(provider, deadline, operation):
-            self.assertEqual(provider, 'gemini')
-            adapter = MagicMock()
-            def exchange(page, upload, prompt, report):
-                uploads.append(upload)
-                with Image.open(upload) as image:
-                    self.assertGreater(image.height, 200)
-                self.assertIn('LIVE ANSWER VIEW', prompt)
-                self.assertIn("coordinate_space", prompt)
-                return '{"action":"click","coordinate_space":"pixels","click_x":180,"click_y":264,"confidence":0.95,"explanation":"B"}'
-            adapter.exchange.side_effect = exchange
-            return operation(adapter, None)
-        with patch.object(self.client, '_run', side_effect=run):
-            raw = self.client.analyze_screenshot(self.image, context_images=contexts,
-                                                 control_regions=[(160, 40, 240, 150)])
-        result = json.loads(raw)
-        self.assertEqual((result['click_x'], result['click_y']), (180, 100))
-        self.assertTrue(self.client.last_grounded)
-        self.assertEqual(self.client.last_provider, 'gemini')
-        self.assertFalse(uploads[0].exists())
-
-    def test_explicit_qwen_coordinate_prompt_still_grounds_nearby_controls(self):
-        self.client.web["providers"] = ["qwen"]
-        with Image.open(self.image) as image:
-            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline="#aaa", width=2)
-            image.save(self.image)
-        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
-                          "confidence": .95, "explanation": "Option D."})
-        with patch.object(self.client, "_run", return_value=raw):
-            grounded = json.loads(self.client.analyze_screenshot(
-                self.image, prompt="Return original pixel coordinates."))
-        self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
-        self.assertEqual(grounded["model_point"], {"space": "pixels", "x": 167, "y": 97})
-        self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
-
-    def test_default_qwen_upload_preserves_original_and_grounds_local_pixels(self):
-        self.client.web["providers"] = ["qwen"]
-        with Image.open(self.image) as image:
-            draw = ImageDraw.Draw(image)
-            draw.ellipse((169, 39, 190, 60), outline="#aaa", width=2)
-            draw.ellipse((169, 89, 190, 110), outline="#aaa", width=2)
-            image.save(self.image)
-        original = self.image.read_bytes()
-        uploads = []
-
-        def run(provider, deadline, operation):
-            adapter = MagicMock()
-
-            def exchange(page, upload, prompt, report):
-                uploads.append(upload)
-                self.assertEqual(upload, self.image.resolve())
-                self.assertIn("coordinate_space", prompt)
-                self.assertNotIn("target_id", prompt)
-                with Image.open(upload) as image:
-                    self.assertEqual(image.size, (320, 200))
-                return json.dumps({"action": "click", "confidence": .95,
-                                   "explanation": "The second option is correct.",
-                                   "coordinate_space": "pixels", "click_x": 180, "click_y": 100})
-
-            adapter.exchange.side_effect = exchange
-            return operation(adapter, None)
-
-        with patch.object(self.client, "_run", side_effect=run):
-            grounded = json.loads(self.client.analyze_screenshot(self.image))
-        self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
-        self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
-        self.assertEqual(self.image.read_bytes(), original)
-        self.assertTrue(uploads[0].exists())
-
-    def test_missing_qwen_control_rejects_the_plan_and_allows_fallback(self):
-        self.client.web["providers"] = ["qwen", "gemini"]
-        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
-                          "confidence": .99, "explanation": "Option D."})
-        with patch.object(self.client, "_run", side_effect=[raw, '{"action":"none"}']):
-            self.assertEqual(self.client.analyze_screenshot(self.image), '{"action":"none"}')
-        self.assertEqual(self.client.last_provider, "gemini")
-        self.assertEqual(self.client.last_attempts, [{"provider": "qwen", "error_code": "browser_grounding"}])
-        self.client.web["providers"] = ["qwen"]
-        with patch.object(self.client, "_run", return_value=raw), self.assertRaises(AIError) as caught:
-            self.client.analyze_screenshot(self.image)
-        self.assertEqual(caught.exception.code, "browser_grounding")
-
-    def test_layout_request_keeps_source_and_prompt_without_annotation(self):
-        self.client.web["providers"] = ["gemini"]
-        def run(provider, deadline, operation):
-            adapter = MagicMock()
-            adapter.exchange.return_value = '{"layout":"read only"}'
-            result = operation(adapter, None)
-            self.assertEqual(adapter.exchange.call_args.args[1:3],
-                             (self.image.resolve(), "Inspect question layout"))
-            return result
-        with patch.object(self.client, "_run", side_effect=run), \
-                patch("web_inference.coordinate_capture") as annotate:
-            self.assertEqual(self.client.inspect_layout(self.image, "Inspect question layout"),
-                             '{"layout":"read only"}')
-        annotate.assert_not_called()
-        self.assertFalse(self.client.last_grounded)
-
-    def test_gemini_single_regions_exclude_outside_controls_from_grounding(self):
-        self.client.web["providers"] = ["gemini"]
-        with Image.open(self.image) as image:
-            draw = ImageDraw.Draw(image)
-            draw.ellipse((39, 49, 60, 70), outline="#aaa", width=2)
-            draw.ellipse((239, 49, 260, 70), outline="#aaa", width=2)
-            image.save(self.image)
-        def run(provider, deadline, operation):
-            adapter = MagicMock()
-            def exchange(page, upload, prompt, report):
-                self.assertIn("coordinate_space", prompt)
-                self.assertNotIn("target_id", prompt)
-                return '{"action":"click","coordinate_space":"pixels","click_x":250,"click_y":60,"confidence":0.95,"explanation":"Answer"}'
-            adapter.exchange.side_effect = exchange
-            return operation(adapter, None)
-        with patch.object(self.client, "_run", side_effect=run):
-            result = json.loads(self.client.analyze_screenshot(self.image, control_regions=[(200, 0, 320, 200)]))
-        self.assertEqual((result["click_x"], result["click_y"]), (250, 60))
-
-    def test_default_gemini_uses_coordinates_and_rejects_id_only_reply(self):
-        self.client.web["providers"] = ["gemini"]
-        with Image.open(self.image) as image:
-            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline="#aaa", width=2)
-            image.save(self.image)
-        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 180, "click_y": 100, "confidence": .95,
-                          "explanation": "Option D."})
-        with patch.object(self.client, "_run", return_value=raw):
-            result = json.loads(self.client.analyze_screenshot(self.image))
-        self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
-        self.assertTrue(self.client.last_grounded)
-        coordinates = json.dumps({"action": "click", "target_id": "01", "confidence": .95,
-                                  "explanation": "IDs alone are insufficient."})
-        with patch.object(self.client, "_run", return_value=coordinates), self.assertRaises(AIError):
-            self.client.analyze_screenshot(self.image)
-        self.assertFalse(self.client.last_grounded)
-
-    def test_total_deadline_is_shared_between_fallbacks(self):
-        self.client.web.update(timeout_seconds=5, attempt_timeout_seconds=10)
-        deadlines = []
-        def run(provider, deadline, operation):
-            deadlines.append(deadline)
-            raise AIError("No response", "browser_error")
-        with patch.object(self.client, "_run", side_effect=run), self.assertRaises(AIError):
-            self.client.analyze_screenshot(self.image)
-        self.assertEqual(len(deadlines), 3)
-        self.assertEqual(len(set(deadlines)), 1)
-
-    def test_missing_sessions_are_skipped_and_cancellation_stops_fallback(self):
-        self.client.cookie_file("gemini").unlink()
-        with patch.object(self.client, "_run", side_effect=AIError("Cancel", "cancelled")) as run:
-            with self.assertRaises(AIError) as caught:
-                self.client.analyze_screenshot(self.image)
-            self.assertEqual(caught.exception.code, "cancelled")
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.args[0], "chatgpt")
-
-    def test_unconfigured_model_is_skipped_before_starting_browser(self):
-        self.client.web["sites"]["gemini"]["model_label"] = ""
-        with patch.object(self.client, "_run", return_value='{"action":"none"}') as run:
-            self.client.analyze_screenshot(self.image)
-        self.assertEqual(run.call_args.args[0], "chatgpt")
-        self.assertEqual(self.client.last_attempts, [{"provider": "gemini", "error_code": "browser_model"}])
-
-    def test_unconfigured_fallbacks_do_not_hide_an_actionable_login_failure(self):
-        for provider in ("chatgpt", "qwen"):
-            self.client.web["sites"][provider]["model_label"] = ""
-        with patch.object(self.client, "_run", side_effect=AIError("Sign in", "browser_login")) as run:
-            with self.assertRaises(AIError) as caught:
-                self.client.analyze_screenshot(self.image)
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(caught.exception.code, "browser_login")
-
-    def test_cookie_import_filters_domains_and_keeps_private_files(self):
-        source = self.root / "export.json"
-        source.write_text(json.dumps({"cookies": [
-            {"name": "session", "value": "test-secret", "domain": ".google.com", "path": "/"},
-            {"name": "unrelated", "value": "other", "domain": ".unrelated.example", "path": "/"}]}))
-        result = self.client.import_cookies("gemini", source)
-        destination = self.client.cookie_file("gemini")
-        self.assertEqual(result["cookies_imported"], 1)
-        self.assertNotIn("test-secret", json.dumps(result))
-        self.assertEqual(json.loads(destination.read_text())[0]["name"], "session")
-        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(destination.parent.stat().st_mode & 0o777, 0o700)
-
-    def test_netscape_cookie_import_and_profile_lock(self):
-        source = self.root / "cookies.txt"
-        source.write_text('# Netscape HTTP Cookie File\n#HttpOnly_.google.com\tTRUE\t/\tTRUE\t0\tsession\ttest\n')
-        self.client.import_cookies("gemini", source)
-        self.assertTrue(json.loads(self.client.cookie_file("gemini").read_text())[0]["httpOnly"])
-        with self.client.session_lock("gemini"):
-            with self.assertRaises(AIError) as caught:
-                with self.client.session_lock("gemini"):
-                    self.fail("Session lock acquired twice")
-            self.assertEqual(caught.exception.code, "browser_busy")
-
-    def test_invalid_cookie_export_preserves_previous_session(self):
-        destination = self.client.cookie_file("gemini")
-        before = destination.read_bytes()
-        source = self.root / "bad.json"
-        source.write_text('{"invalid":"sensitive-value"}')
-        with self.assertRaises(AIError) as caught:
-            self.client.import_cookies("gemini", source)
-        self.assertNotIn("sensitive-value", str(caught.exception))
-        self.assertEqual(before, destination.read_bytes())
-
-    def test_failed_page_preserves_imported_session(self):
-        destination = self.client.cookie_file("gemini")
-        write_private_json(destination, [{"name": "SID", "value": "local-test-session"}])
-        before = destination.read_bytes()
-        page = MagicMock()
-        page.save_cookies.side_effect = lambda path: write_private_json(path, [])
-        operation = MagicMock(side_effect=AIError("Signed out", "browser_login"))
-        with patch("web_inference.Lightpanda") as runtime:
-            runtime.return_value.__enter__.return_value = page
-            with self.assertRaises(AIError):
-                self.client._run("gemini", time.monotonic() + 10, operation)
-        page.save_cookies.assert_not_called()
-        self.assertEqual(destination.read_bytes(), before)
-
-    def test_successful_operation_survives_cookie_refresh_failure(self):
-        page = MagicMock()
-        page.save_cookies.side_effect = AIError("Deadline", "browser_timeout")
-        with patch("web_inference.Lightpanda") as runtime:
-            runtime.return_value.__enter__.return_value = page
-            self.assertEqual(self.client._run("gemini", time.monotonic() + 10,
-                                             lambda adapter, browser: "complete answer"), "complete answer")
-        page.save_cookies.assert_called_once_with(self.client.cookie_file("gemini"))
+    def test_session_lock_does_not_allow_overlapping_requests(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = WebInferenceClient({"web": {"state_dir": root}})
+            with client.session_lock("qwen"):
+                with self.assertRaises(AIError):
+                    with client.session_lock("qwen"):
+                        self.fail("Session lock acquired twice")
 
 
 FIXTURE = r'''<!doctype html><html><body>
@@ -425,9 +61,7 @@ FIXTURE = r'''<!doctype html><html><body>
 <button id=send disabled>Send</button>
 <script>
 const scenario=SCENARIO;
-const answer=JSON.stringify(scenario==='control_ids'
- ?{action:'click',coordinate_space:'pixels',click_x:180,click_y:264,confidence:0.99,explanation:'Center'}
- :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
+const answer=JSON.stringify({status:'answer',confidence:0.99,answer:'2'});
 window.submissions=0;window.attachmentRemovals=0;
 document.querySelector('#new-chat').onclick=()=>{
  document.querySelectorAll('.user,.response,#stop').forEach(e=>e.remove());
@@ -521,10 +155,8 @@ TEST_SELECTORS = {
 }
 
 
-@unittest.skipUnless(os.environ.get("SETH_LIGHTPANDA_TESTS") == "1", "Set SETH_LIGHTPANDA_TESTS=1 for offline Lightpanda integration")
-class LightpandaIntegrationTests(unittest.TestCase):
-    runtime_engine = 'lightpanda'
-
+@unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1", "Set SETH_CHROMIUM_TESTS=1 for offline Chromium integration")
+class ChromiumIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.uploads = []
@@ -562,9 +194,8 @@ class LightpandaIntegrationTests(unittest.TestCase):
         Image.new("RGB", (320, 200), "white").save(self.image)
         self.stop = threading.Event()
 
-    def browser(self, timeout=8, cookies=None):
-        return Lightpanda(executable=os.environ.get("SETH_TEST_LIGHTPANDA", str(DEFAULT_BINARY)),
-                          deadline=time.monotonic() + timeout, stop_event=self.stop, cookies=cookies)
+    def browser(self, timeout=8):
+        return Chromium(profile=self.root / "profile", deadline=time.monotonic() + timeout, stop_event=self.stop)
 
     def adapter(self, scenario="normal"):
         selectors = TEST_SELECTORS | ({"file": 'input[type="file"][accept*="image"]'} if scenario in ("menu", "raf_menu") else {})
@@ -578,13 +209,13 @@ class LightpandaIntegrationTests(unittest.TestCase):
         for scenario in ("normal", "code", "suffix", "jpeg_suffix", "menu"):
             with self.subTest(scenario=scenario), self.browser() as page:
                 before = len(self.uploads)
-                raw = self.adapter(scenario).exchange(page, self.image, build_prompt(320, 200), lambda label: None)
+                raw = self.adapter(scenario).exchange(page, self.image, build_prompt("mc"), lambda label: None)
                 self.assertTrue(page.evaluate("window.completed"))
                 self.assertEqual(page.evaluate("window.submissions"), 1)
                 self.assertEqual(len(self.uploads), before + 1)
                 self.assertEqual(hashlib.sha256(self.uploads[-1]).digest(), hashlib.sha256(self.image.read_bytes()).digest())
-                decision = WebInferenceClient({}).parse_coordinates(raw, 320, 200)
-                self.assertEqual((decision["click_x"], decision["click_y"]), (160, 100))
+                decision = parse_decision(raw, "mc")
+                self.assertEqual(decision["answer"], "2")
 
     def test_unsent_attachment_from_an_earlier_attempt_is_cleared_before_a_new_upload(self):
         adapter = self.adapter('draft_persists')
@@ -594,11 +225,10 @@ class LightpandaIntegrationTests(unittest.TestCase):
             adapter.wait_attachment(page,self.image)
             self.assertEqual(page.evaluate('window.submissions'),0)
             self.assertEqual(len(adapter.snapshot(page)['attachments']),1)
-            if self.runtime_engine=='chromium':
-                page.evaluate("""(()=>{const s=document.createElement('style');
+            page.evaluate("""(()=>{const s=document.createElement('style');
 s.textContent='.attachment .remove{visibility:hidden}.attachment:hover .remove{visibility:visible}';
 document.head.append(s);})()""")
-                self.assertEqual(page.evaluate("getComputedStyle(document.querySelector('.attachment .remove')).visibility"),'hidden')
+            self.assertEqual(page.evaluate("getComputedStyle(document.querySelector('.attachment .remove')).visibility"),'hidden')
             before = len(self.uploads)
             page.reuse_page = True
             raw = adapter.exchange(page,self.image,'Fresh question',lambda label:None)
@@ -606,31 +236,7 @@ document.head.append(s);})()""")
             self.assertEqual(page.evaluate('window.attachmentRemovals'),1)
             self.assertEqual(len(self.uploads),before+1)
             self.assertIn('Fresh question',adapter.snapshot(page)['users'][0])
-            self.assertEqual(WebInferenceClient({}).parse_coordinates(raw,320,200)['click_x'],160)
-
-    def test_client_scroll_context_upload_maps_coordinates_to_live_controls(self):
-        with Image.open(self.image) as image:
-            ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
-            image.save(self.image)
-        config = {'web': {'providers': ['gemini'], 'state_dir': str(self.root / 'state'),
-                          'executable_path': os.environ.get('SETH_TEST_LIGHTPANDA', str(DEFAULT_BINARY)),
-                          'timeout_seconds': 12, 'attempt_timeout_seconds': 12,
-                          'sites': {'gemini': {'model_label': 'Pro', 'engine': self.runtime_engine}}}}
-        client = WebInferenceClient(config)
-        write_private_json(client.cookie_file('gemini'), [])
-        before = len(self.uploads)
-        with patch.object(client, 'adapter', return_value=self.adapter('control_ids')):
-            raw = client.analyze_screenshot(self.image, context_images=[{
-                'path': self.image, 'box': (0, 0, 160, 80), 'label': 'Question top'}],
-                control_regions=[(160, 40, 240, 150)])
-        decision = client.parse_coordinates(raw, 320, 200)
-        self.assertEqual((decision['click_x'], decision['click_y']), (180, 100))
-        self.assertTrue(client.last_grounded)
-        self.assertEqual(len(self.uploads), before + 1)
-        import io
-        with Image.open(io.BytesIO(self.uploads[-1])) as packed:
-            self.assertEqual(packed.width, 320)
-            self.assertGreater(packed.height, 200)
+            self.assertEqual(parse_decision(raw, "mc")["answer"],"2")
 
     def test_login_model_and_restored_conversation_fail_before_upload(self):
         for scenario, code in (("login", "browser_login"), ("wrong_model", "browser_model"), ("stale", "browser_layout")):
@@ -683,20 +289,6 @@ document.head.append(s);})()""")
                 self.assertEqual(caught.exception.code, code)
                 self.assertEqual(page.evaluate("window.submissions"), 1)
 
-    def test_cookie_persistence_across_real_browser_restarts(self):
-        cookies = self.root / "cookies.json"
-        with self.browser() as page:
-            page.navigate(self.adapter().site["url"])
-            page.wait(lambda: page.evaluate('document.querySelector("#editor")!==null'))
-            page.save_cookies(cookies)
-        self.assertEqual(cookies.stat().st_mode & 0o777, 0o600)
-        with self.browser(cookies=cookies) as page:
-            # Check before navigating: the fixture would otherwise set the same
-            # cookie again and hide a failed restore.
-            restored = page.call("Network.getAllCookies").get("cookies", [])
-            self.assertTrue(any(c["name"] == "seth_test" and c["value"] == "restored"
-                                for c in restored))
-
     def test_cancellation_terminates_waiting_and_browser_process(self):
         runtime = self.browser()
         timer = threading.Timer(0.7, self.stop.set)
@@ -710,16 +302,6 @@ document.head.append(s);})()""")
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertIsNone(runtime.process)
 
-
-@unittest.skipUnless(os.environ.get("SETH_CHROMIUM_TESTS") == "1", "Set SETH_CHROMIUM_TESTS=1 for offline Chromium integration")
-class ChromiumIntegrationTests(LightpandaIntegrationTests):
-    __unittest_skip__ = os.environ.get("SETH_CHROMIUM_TESTS") != "1"
-    runtime_engine = 'chromium'
-
-    def browser(self, timeout=8, cookies=None):
-        return Chromium(executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),
-                        profile=self.root / "profile", deadline=time.monotonic() + timeout,
-                        stop_event=self.stop, cookies=cookies)
 
     def test_native_profile_retains_persistent_cookie_without_export_or_import(self):
         profile = self.root / "native-cookie-profile"
@@ -765,7 +347,7 @@ class ChromiumIntegrationTests(LightpandaIntegrationTests):
                 self.assertEqual(page.evaluate("window.animationProbe"), 1)
                 self.assertEqual(len(self.uploads), before + 1)
                 self.assertEqual(page.evaluate("window.submissions"), 1)
-                self.assertEqual(WebInferenceClient({}).parse_coordinates(raw, 320, 200)["click_x"], 160)
+                self.assertEqual(parse_decision(raw, "mc")["answer"], "2")
                 # Rendering the original tab must not activate it over the user's tab.
                 page.session = page.call("Target.attachToTarget", {
                     "targetId": foreground, "flatten": True})["sessionId"]
@@ -794,14 +376,10 @@ class ChromiumIntegrationTests(LightpandaIntegrationTests):
                         self.assertEqual(page.evaluate("window.submissions"), 2)
                         self.assertEqual(json.loads(state.read_text())["pid"], pid)
                         self.assertNotIn("First question", adapter.snapshot(page)["users"][0])
-                        self.assertEqual(WebInferenceClient({}).parse_coordinates(raw, 320, 200)["click_x"], 160)
+                        self.assertEqual(parse_decision(raw, "mc")["answer"], "2")
                         if scenario == "sidebar":
                             self.assertEqual(page.evaluate("window.brandClicks"), 0)
                             self.assertEqual(page.evaluate("window.newChatClicks"), 1)
                     self.assertEqual(state.stat().st_mode & 0o777, 0o600)
                 finally:
                     close_managed_browser(state, profile)
-
-
-if __name__ == "__main__":
-    unittest.main()

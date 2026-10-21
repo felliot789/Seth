@@ -1,4 +1,4 @@
-"""OpenAI-compatible vision requests and strict, screenshot-relative decisions."""
+"""One cancellable OpenAI-compatible vision request with the shared answer-key prompt."""
 
 import base64
 import io
@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from inference import AIError, DecisionClient, build_prompt, screenshot_info, screenshot_size
+from inference import AIError, build_prompt, screenshot_info
 
 from settings import load_config
 
@@ -27,18 +27,15 @@ def _api_request_worker(connection, api, payload):
     except AIError as error:
         connection.send({"error": str(error), "code": error.code})
     except Exception:
-        connection.send({"error": "Inference request failed; no click was attempted.", "code": "api_error"})
+        connection.send({"error": "Inference request failed.", "code": "api_error"})
     finally:
         connection.close()
 
 
-class SethAIClient(DecisionClient):
-    supports_scroll_context = True
-
+class SethAIClient:
     def __init__(self, config=None, config_file=None, *, stop_event=None):
         self.config = config if config is not None else load_config(config_file)
         self.api = self.config.get("api", {})
-        self.last_grounded = False
         self.stop_event = stop_event
 
     @property
@@ -65,55 +62,23 @@ class SethAIClient(DecisionClient):
         if type(self.api.get("stream", False)) is not bool:
             raise AIError("api.stream must be true or false.")
 
-    def analyze_screenshot(self, image_path, prompt=None, response_format=None, *, context_images=None, control_regions=None, scroll_targets=None):
-        self.last_grounded = False
-        if prompt is not None and not context_images and scroll_targets is None:
-            return self._analyze_screenshot(image_path, prompt, response_format)
-        if prompt:
-            raise AIError("Scroll context requires the default coordinate prompt.", "browser_grounding")
-        self.validate_config()
-        from control_targets import coordinate_capture, ground_capture_decision
-        with coordinate_capture(image_path, context_images=context_images, regions=control_regions,
-                                scroll_targets=scroll_targets) as (upload, mappings):
-            width, height = screenshot_size(upload)
-            context_prompt = ("This image contains one question across scroll captures. Read every section. "
-                              "Coordinates refer to the ENTIRE uploaded image, including headers. "
-                              + ("Answer controls in any section are selectable. " if scroll_targets is not None else
-                                 "Only answer controls in the bottom LIVE ANSWER VIEW are selectable. ")) if context_images or scroll_targets else ""
-            raw = self._analyze_screenshot(upload, context_prompt + build_prompt(width, height), response_format)
-            decision = self.parse_coordinates(raw, width, height)
-            if decision is not None:
-                decision = ground_capture_decision(image_path, decision, mappings, regions=control_regions)
-        self.last_grounded = decision is not None
-        return json.dumps(decision) if decision is not None else raw
-
-    def inspect_layout(self, image_path, prompt):
-        """A separate read-only layout request, never parsed as an answer plan."""
-        self.last_grounded = False
-        return self._analyze_screenshot(image_path, prompt)
-
-    def _analyze_screenshot(self, image_path, prompt=None, response_format=None):
+    def analyze_screenshot(self, image_path, question_type):
         self.validate_config()
         with open(image_path, "rb") as stream:
             data = stream.read()
-        (width, height), mime = screenshot_info(io.BytesIO(data))
-        if prompt is None:
-            prompt = build_prompt(width, height)
-        encoded = base64.b64encode(data).decode("ascii")
+        _, mime = screenshot_info(io.BytesIO(data))
         payload = {
             "model": self.api["model"],
             "stream": self.api.get("stream", False),
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + encoded}},
+                {"type": "text", "text": build_prompt(question_type)},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")}},
             ]}],
         }
-        fmt = response_format if response_format is not None else self.api.get("response_format")
+        fmt = self.api.get("response_format")
         if fmt:
             payload["response_format"] = {"type": fmt} if isinstance(fmt, str) else fmt
-        if self.stop_event is not None:
-            return self._cancellable_request(payload)
-        return self._request(payload)
+        return self._cancellable_request(payload) if self.stop_event is not None else self._request(payload)
 
     def _cancellable_request(self, payload):
         if self.stop_event.is_set():
@@ -143,7 +108,7 @@ class SethAIClient(DecisionClient):
                         raise AIError(result["error"], result["code"])
                     return result["content"]
                 if time.monotonic() >= deadline:
-                    raise AIError("Inference response timed out; no click was attempted.", "response_timeout")
+                    raise AIError("Inference response timed out.", "response_timeout")
         finally:
             sender.close()
             receiver.close()
@@ -172,29 +137,29 @@ class SethAIClient(DecisionClient):
                 stream=payload["stream"],
             )
         except requests.exceptions.ConnectTimeout:
-            raise AIError("Inference connection timed out; no click was attempted.", "connect_timeout") from None
+            raise AIError("Inference connection timed out.", "connect_timeout") from None
         except requests.Timeout:
-            raise AIError(f"Inference response timed out after {read_timeout}s; no click was attempted.",
+            raise AIError(f"Inference response timed out after {read_timeout}s.",
                           "response_timeout") from None
         except requests.exceptions.SSLError:
             raise AIError("Inference TLS verification failed; check the provider URL and host certificates.") from None
         except requests.ConnectionError:
             raise AIError("Cannot connect to inference; check the provider URL and host network.") from None
         except requests.RequestException:
-            raise AIError("Inference request failed or timed out; no click was attempted.") from None
+            raise AIError("Inference request failed or timed out.") from None
         try:
             LOG.info("Inference returned HTTP %s after %.1fs", response.status_code, time.monotonic() - started)
             if response.status_code == 524:
-                raise AIError("Inference tunnel timed out waiting for the upstream answer (HTTP 524); no click was attempted.",
+                raise AIError("Inference tunnel timed out waiting for the upstream answer (HTTP 524).",
                               "response_timeout")
             if response.status_code == 530:
-                raise AIError("Inference gateway cannot resolve its origin (HTTP 530). Restart the provider tunnel or update INFERENCE_BASE_URL; no click was attempted.",
+                raise AIError("Inference gateway cannot resolve its origin (HTTP 530). Restart the provider tunnel or update INFERENCE_BASE_URL.",
                               "gateway_unavailable")
             if response.status_code != 200:
-                raise AIError(f"Inference returned HTTP {response.status_code}; no click was attempted.")
+                raise AIError(f"Inference returned HTTP {response.status_code}.")
             if payload["stream"]:
                 if "text/event-stream" not in response.headers.get("content-type", "").lower():
-                    raise AIError("Inference did not return the requested event stream; no click was attempted.")
+                    raise AIError("Inference did not return the requested event stream.")
                 content = self._read_stream(response, started, read_timeout)
                 LOG.info("Inference stream completed after %.1fs", time.monotonic() - started)
                 return content
@@ -206,10 +171,10 @@ class SethAIClient(DecisionClient):
                 # Legacy compatible gateways omit finish_reason entirely. An
                 # explicit reason must still prove a completed plain answer.
                 if "finish_reason" in choice and choice["finish_reason"] != "stop":
-                    raise AIError("Inference did not complete a plain text answer; no click was attempted.")
+                    raise AIError("Inference did not complete a plain text answer.")
                 message = choice["message"]
                 if not isinstance(message, dict) or any(message.get(key) for key in ("refusal", "tool_calls", "function_call")):
-                    raise AIError("Inference returned a refusal or tool call; no click was attempted.")
+                    raise AIError("Inference returned a refusal or tool call.")
                 content = message["content"]
             except (ValueError, KeyError, IndexError, TypeError):
                 raise AIError("Inference returned an invalid chat completion.") from None
@@ -217,13 +182,13 @@ class SethAIClient(DecisionClient):
                 raise AIError("Inference returned no text decision.")
             return content
         except requests.RequestException:
-            raise AIError("Inference stream was interrupted; no click was attempted.", "stream_error") from None
+            raise AIError("Inference stream was interrupted.", "stream_error") from None
         finally:
             response.close()
 
     @staticmethod
     def _read_stream(response, started, timeout):
-        """Assemble a completed answer; never expose partial JSON to the clicker."""
+        """Assemble a completed answer; never expose partial JSON to the caller."""
         response.encoding = "utf-8"
         parts, event_data = [], []
         finish = None
@@ -236,7 +201,7 @@ class SethAIClient(DecisionClient):
             try:
                 chunk = json.loads(data)
                 if not isinstance(chunk, dict) or chunk.get("error") is not None:
-                    raise AIError("Inference stream returned an API error; no click was attempted.")
+                    raise AIError("Inference stream returned an API error.")
                 choices = chunk.get("choices", [])
                 if not isinstance(choices, list):
                     raise ValueError
@@ -260,12 +225,12 @@ class SethAIClient(DecisionClient):
                             raise ValueError
                         finish = reason
             except (ValueError, TypeError, AttributeError):
-                raise AIError("Inference returned an invalid event stream; no click was attempted.") from None
+                raise AIError("Inference returned an invalid event stream.") from None
             return False
 
         for line in response.iter_lines(chunk_size=1, decode_unicode=True):
             if time.monotonic() - started > timeout:
-                raise AIError(f"Inference response timed out after {timeout}s; no click was attempted.", "response_timeout")
+                raise AIError(f"Inference response timed out after {timeout}s.", "response_timeout")
             if not line:
                 if event_data:
                     done = consume("\n".join(event_data))
@@ -281,5 +246,5 @@ class SethAIClient(DecisionClient):
         # Some gateways close after finish_reason=stop without a [DONE] sentinel.
         # A clean EOF is acceptable only when an explicit successful finish arrived.
         if finish != "stop" or not content.strip():
-            raise AIError("Inference stream ended without a complete answer; no click was attempted.")
+            raise AIError("Inference stream ended without a complete answer.")
         return content

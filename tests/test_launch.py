@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from browser_service import BrowserManager, configured_providers, status_file
 from chromium_runtime import Chromium, managed_browser
 from inference import AIError
-from lightpanda_runtime import write_private_json
+from cdp import write_private_json
 from service_runtime import notify
 import seth_cli
 from web_inference import SITES
@@ -48,7 +48,7 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual([call.args for call in control.call_args_list], [
                 ("stop", "seth-listener.service"), ("stop", "seth.target", "seth-browser.service")])
 
-    def test_install_renders_this_checkout_and_replaces_old_autostart_without_stopping_services(self):
+    def test_install_renders_this_checkout_and_enables_autostart_without_stopping_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             with patch.object(seth_cli, "config_home", return_value=directory / "config"), \
@@ -63,7 +63,7 @@ class LaunchTests(unittest.TestCase):
                 self.assertNotIn("@ROOT@", listener)
                 self.assertTrue(seth_cli.installation()["restart_listener"])
             self.assertEqual([call.args for call in control.call_args_list], [
-                ("daemon-reload",), ("disable", "seth-listener.service"), ("enable", "seth.target")])
+                ("daemon-reload",), ("enable", "seth.target")])
 
     def test_systemd_paths_escape_specifiers_and_exec_environment_expansion(self):
         path = '/tmp/a b/$HOME/%name/"quote"'
@@ -74,8 +74,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_status_does_not_trust_old_manager_or_stale_cached_provider_readiness(self):
         with tempfile.TemporaryDirectory() as temporary:
-            config = {"web": {"state_dir": temporary, "sites": {"qwen": {
-                "engine": "chromium", "keep_browser_open": True}}}}
+            config = {"web": {"state_dir": temporary, "sites": {"qwen": {}}}}
             write_private_json(status_file(config), {"updated_at": time.time(), "manager_pid": 12,
                                "providers": {"qwen": {"status": "ready"}}})
             with patch.object(seth_cli, "unit_state", return_value={"ActiveState": "active", "MainPID": "34"}):
@@ -102,7 +101,7 @@ class LaunchTests(unittest.TestCase):
     def test_doctor_reads_keyboard_capabilities_without_grabbing_or_reading_events(self):
         import evdev
         keyboard = SimpleNamespace(name="Physical keyboard", close=Mock(), capabilities=lambda: {
-            evdev.ecodes.EV_KEY: [97, 32, 33, 18, 19, 16, 17]})
+            evdev.ecodes.EV_KEY: [97, 32, 33, 18, 19, 16, 17, 34, 44]})
         status = {"services": {"listener": {"ActiveState": "active"}},
                   "providers": {"qwen": {"status": "ready", "detail": ""}},
                   "api": {"status": "reachable", "detail": ""}}
@@ -114,10 +113,9 @@ class LaunchTests(unittest.TestCase):
 
     def test_manual_provider_choices_share_one_profile_and_manager_is_singleton(self):
         with tempfile.TemporaryDirectory() as temporary:
-            config = {"web": {"state_dir": temporary, "providers": ["qwen"], "sites": {
-                "gemini": {"engine": "chromium", "keep_browser_open": True, "browser_profile": "qwen"},
-                "qwen": {"engine": "chromium", "keep_browser_open": True}}}}
-            self.assertEqual(configured_providers(config), ["gemini", "qwen"])
+            config = {"web": {"state_dir": temporary, "sites": {
+                "gemini": {"browser_profile": "qwen"}, "qwen": {}}}}
+            self.assertEqual(configured_providers(config), ["qwen", "gemini"])
             manager = BrowserManager(config)
             self.assertEqual(len(manager.groups), 1)
             with manager.lock():
@@ -189,13 +187,13 @@ class BrowserLifecycleTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         sites = {provider: SITES[provider] | {"url": f"http://127.0.0.1:{self.server.server_port}/{provider}",
-                                            "cookie_domains": ("127.0.0.1",)} for provider in ("gemini", "qwen")}
+                                            "login_domains": ("127.0.0.1",)} for provider in ("gemini", "qwen")}
         self.site_patch = patch.dict(SITES, sites)
         self.site_patch.start()
         self.addCleanup(self.site_patch.stop)
-        options = {"engine": "chromium", "keep_browser_open": True, "model_label": "Pro",
+        options = {"model_label": "Pro",
                    "selectors": {"model": "#model", "editor": "#editor"}}
-        self.config = {"web": {"state_dir": self.temporary.name, "providers": ["qwen"], "sites": {
+        self.config = {"web": {"state_dir": self.temporary.name, "sites": {
             "gemini": options | {"browser_profile": "qwen"}, "qwen": options.copy()}}}
         self.manager = BrowserManager(self.config, headless=True)
         self.addCleanup(self.manager.close)

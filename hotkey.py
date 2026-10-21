@@ -1,4 +1,4 @@
-"""Linux run, interrupt, indicator, provider, and capture chords, including on Wayland."""
+"""Linux run, interrupt, provider and question-format chords, including Wayland."""
 
 import logging
 import select
@@ -13,16 +13,17 @@ LETTERS = {32, 33}  # D, F
 SELECT_LETTERS = {18, 19}  # E, R
 COLOR_LETTERS = {16, 17}  # Q, W
 INTERRUPT_LETTERS = {34}  # G
+FORMAT_LETTERS = {44}  # Z
 
 
 class ChordFilter:
     """Delay Ctrl+D/F until release; consume both when the chord completes.
 
-    Fire only after all chord keys are released so Ctrl cannot modify VM clicks.
+    Fire once, only after all chord keys are released.
     Holding keys, autorepeat, or an incomplete chord never queues extra cycles.
     """
 
-    def __init__(self, enable_toggle=False, enable_provider=False, enable_capture=False, enable_text_color=False,
+    def __init__(self, enable_toggle=False, enable_provider=False, enable_format=False, enable_text_color=False,
                  enable_interrupt=False):
         self.down = set()
         self.pending = []
@@ -32,9 +33,11 @@ class ChordFilter:
         self.cancelled = False
         self.blocked = False
         self.bindings = {frozenset(LETTERS): ("cycle", "toggle" if enable_toggle else None)}
-        if enable_provider or enable_capture:
+        if enable_provider:
             self.bindings[frozenset(SELECT_LETTERS)] = (
-                "provider" if enable_provider else None, "capture" if enable_capture else None)
+                "provider", None)
+        if enable_format:
+            self.bindings[frozenset(FORMAT_LETTERS)] = (None, "format")
         if enable_text_color:
             self.bindings[frozenset(COLOR_LETTERS)] = (None, "text_color")
         if enable_interrupt:
@@ -116,12 +119,12 @@ class ChordFilter:
 
 
 class SethHotkey:
-    def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, capture_callback=None,
+    def __init__(self, callback, devices=None, toggle_callback=None, provider_callback=None, format_callback=None,
                  text_color_callback=None, interrupt_callback=None):
         self.callback = callback
         self.toggle_callback = toggle_callback
         self.provider_callback = provider_callback
-        self.capture_callback = capture_callback
+        self.format_callback = format_callback
         self.text_color_callback = text_color_callback
         self.interrupt_callback = interrupt_callback
         self.paths = devices
@@ -144,7 +147,9 @@ class SethHotkey:
                     caps = device.capabilities()
                     keys = set(caps.get(evdev.ecodes.EV_KEY, []))
                     # Skip mice advertising keyboard keys and our own virtual devices.
-                    required = LETTERS | (SELECT_LETTERS if self.provider_callback or self.capture_callback else set())
+                    required = LETTERS | (SELECT_LETTERS if self.provider_callback else set())
+                    if self.format_callback is not None:
+                        required |= FORMAT_LETTERS
                     if self.text_color_callback is not None:
                         required |= COLOR_LETTERS
                     if self.interrupt_callback is not None:
@@ -159,7 +164,7 @@ class SethHotkey:
                     self.devices.append((device, virtual, ChordFilter(
                         enable_toggle=self.toggle_callback is not None,
                         enable_provider=self.provider_callback is not None,
-                        enable_capture=self.capture_callback is not None,
+                        enable_format=self.format_callback is not None,
                         enable_text_color=self.text_color_callback is not None,
                         enable_interrupt=self.interrupt_callback is not None)))
                     LOG.info("Shortcut keyboard: %s (%s)", device.name, path)
@@ -209,9 +214,9 @@ class SethHotkey:
                     elif fired == "provider":
                         accepted = self.provider_callback()
                         LOG.info("Ctrl+E+R: %s", "provider changed" if accepted else "busy; switch discarded")
-                    elif fired == "capture":
-                        accepted = self.capture_callback()
-                        LOG.info("Ctrl+Shift+E+R: %s", "capture mode changed" if accepted else "busy; switch discarded")
+                    elif fired == "format":
+                        accepted = self.format_callback()
+                        LOG.info("Ctrl+Shift+Z: %s", "question format changed" if accepted else "busy; switch discarded")
                     elif fired == "cycle":
                         accepted = self.callback()
                         LOG.info("Ctrl+D+F: %s", "cycle requested" if accepted else "busy; request discarded")

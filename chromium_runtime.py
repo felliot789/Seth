@@ -1,4 +1,4 @@
-"""Optional installed Chromium runtime using the same bounded, direct CDP client."""
+"""Installed Chromium with native profiles and a bounded, direct CDP client."""
 
 from contextlib import contextmanager
 import json
@@ -15,7 +15,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from inference import AIError
-from lightpanda_runtime import Lightpanda, write_private_json
+from cdp import CDP, write_private_json
 
 _MANAGED_PROCESSES = {}
 
@@ -36,7 +36,7 @@ def find_chromium(executable=None):
         shutil.which("chromium") or shutil.which("google-chrome"))
 
 
-class Chromium(Lightpanda):
+class Chromium(CDP):
     label = "Chromium"
 
     def __init__(self, *, profile, executable=None, headless=True, state_file=None, keep_open=False,
@@ -112,17 +112,10 @@ class Chromium(Lightpanda):
             if self.keep_open and self.state_file:
                 write_private_json(self.state_file, {"pid": self.process.pid, "port": port,
                     "profile": str(self.profile), "target_id": target})
-            if self.cookies and self.cookies.is_file():
-                records = json.loads(self.cookies.read_text())
-                keys = {"name", "value", "url", "domain", "path", "secure", "httpOnly", "sameSite",
-                        "expires", "priority", "sameParty", "sourceScheme", "sourcePort", "partitionKey"}
-                cookies = [{k: v for k, v in record.items() if k in keys and not (
-                    k == "expires" and v <= 0)} for record in records]
-                self.call("Network.setCookies", {"cookies": cookies})
             return self
         except (OSError, ValueError, TypeError, KeyError, websocket.WebSocketException):
             self.close()
-            raise AIError("Chromium's saved session is unavailable. Run --login to restore it.", "browser_start") from None
+            raise AIError("Chromium's saved session is unavailable. Run seth up and inspect seth status.", "browser_start") from None
         except BaseException:
             self.close()
             raise
@@ -137,7 +130,7 @@ class Chromium(Lightpanda):
             return
         info = self.call("Target.getTargetInfo", {"targetId": target}).get("targetInfo", {})
         if info.get("type") != "page":
-            raise AIError("The managed chat tab was closed. Run --login to reopen it.", "browser_login")
+            raise AIError("The managed chat tab was closed. Run seth up to reopen it.", "browser_login")
         self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         self.call("Page.enable")
         self.call("Runtime.enable")

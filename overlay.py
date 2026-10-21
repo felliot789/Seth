@@ -9,8 +9,8 @@ from trigger import TriggerError
 
 COLORS = {
     "idle": "#94a3b8", "capturing": "#60a5fa", "thinking": "#fbbf24",
-    "selecting": "#c084fc", "done": "#4ade80", "dry_run": "#60a5fa",
-    "no_action": "#fb923c", "low_confidence": "#fb923c",
+    "done": "#4ade80",
+    "no_action": "#fb923c", "uncertain": "#fb923c",
     "error": "#f87171", "cancelled": "#94a3b8",
 }
 TEXT_COLORS = {"white": "#ffffff", "black": "#000000"}
@@ -68,6 +68,9 @@ class SethOverlay:
         self.label = QLabel(panel)
         self.label.setGeometry(13, 0, 294, 38)
         self.label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
+        self.label.setWordWrap(True)
+        self.full_size = (336, 38)
         self.text_color = "white"
         self._apply_text_color()
         self.progress = None
@@ -92,9 +95,17 @@ class SethOverlay:
         if state == "thinking":
             elapsed = max(0, int(time.monotonic() - self.progress_started))
             label = f"Waiting {elapsed // 60}:{elapsed % 60:02d}"
-        text = " · ".join(["Seth"] + ([selection] if selection else []) + [label])
+        text = label if state == "done" else " · ".join(["Seth"] + ([selection] if selection else []) + [label])
         if self.label.text() != text:
             self.label.setText(text)
+            screen = self.app.primaryScreen()
+            maximum = screen.availableGeometry().width() - 32 if screen else 800
+            width = min(maximum, max(336, self.label.fontMetrics().horizontalAdvance(text) + 42))
+            height = max(38, self.label.heightForWidth(width - 42) + 12)
+            self.full_size = (width, height)
+            self.panel.setGeometry(0, 0, width, height)
+            self.label.setGeometry(13, 0, width - 42, height)
+            self._apply_mode()
 
     def poll(self, progress, selection=None):
         self.update(progress, selection)
@@ -106,7 +117,7 @@ class SethOverlay:
 
     def _apply_mode(self):
         full = self.display_mode == "full"
-        self.window.setFixedSize(336 if full else 32, 38)
+        self.window.setFixedSize(*(self.full_size if full else (32, 38)))
         self.panel.setVisible(full)
         # The dot's screen position is identical in Full and Dot modes.
         self.dot.move(self.window.width() - 18, 17)

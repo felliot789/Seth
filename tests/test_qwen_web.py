@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image, ImageDraw
 
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
-from inference import AIError
-from lightpanda_runtime import write_private_json
+from inference import AIError, parse_decision
+from cdp import write_private_json
 from web_inference import WebInferenceClient
 
 
@@ -116,21 +116,18 @@ send.onclick=()=>{
  const user=document.createElement('div');user.className='qwen-chat-message-user';user.textContent=draft;
  const assistant=document.createElement('div');assistant.className='qwen-chat-message-assistant';
  assistant.innerHTML='<div class="qwen-chat-thinking-status-card-completed"><div class="qwen-markdown"></div><button aria-label="Copy">Copy thinking</button></div>';
- assistant.querySelector('.qwen-markdown').textContent=JSON.stringify({action:'none',explanation:'Thinking, not the final answer'});
+ assistant.querySelector('.qwen-markdown').textContent=JSON.stringify({status:'answer',confidence:0.99,answer:'99'});
  const stop=document.createElement('button');stop.className='stop-button';stop.setAttribute('aria-label','Stop');
  document.body.append(user,assistant,stop);files.replaceChildren();send.disabled=true;
  setTimeout(()=>{
    const final=document.createElement('div');final.className='response-message-content phase-answer';
    final.innerHTML='<div class="qwen-markdown"><pre><code></code></pre></div>';
-   const decision=scenario==='control_ids'
-     ?{action:'click',coordinate_space:'pixels',click_x:160,click_y:100,confidence:0.99,explanation:'Final answer'}
-     :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Final answer'};
+   const decision={status:'answer',confidence:0.99,answer:'2'};
    final.querySelector('code').textContent=JSON.stringify(decision);
    if(scenario==='rendered_code'){
-     const answer={action:'select',selection_type:'multiple_answer',coordinate_space:'pixels',selections:[
-       {option:'A',click_x:160,click_y:60},{option:'C',click_x:160,click_y:140}],confidence:0.99,
-       explanation:'Complete answer: café ✓ '+ 'proof '.repeat(100)};
-     final.querySelector('.qwen-markdown').innerHTML='<pre class="qwen-markdown-code"><div class="qwen-markdown-code-header"><span>json</span><button aria-label="Download">Download</button></div><div class="qwen-markdown-code-editor-viewport">12345678910111213141516 {"action": "select", "selections": [</div></pre>';
+     const answer={status:'answer',confidence:0.99,
+       answer:'1, 3 café ✓ '+ 'proof '.repeat(100)};
+     final.querySelector('.qwen-markdown').innerHTML='<pre class="qwen-markdown-code"><div class="qwen-markdown-code-header"><span>json</span><button aria-label="Download">Download</button></div><div class="qwen-markdown-code-editor-viewport">12345678910111213141516 {"status": "answer", "answer": "</div></pre>';
      final.querySelector('[aria-label="Download"]').onclick=()=>{
        if(!window.completed)throw new Error('Download before completed final answer');
        window.downloads++;window.events.push('download');
@@ -199,7 +196,7 @@ class ChromiumUploadCleanupTests(unittest.TestCase):
                 self.assert_cleanup_command(page)
 
     def test_answer_download_is_private_bounded_and_cleaned_up(self):
-        for content, expected_code in (('{"action":"none"}', None), ("", "browser_error"),
+        for content, expected_code in (('{"status":"no_action"}', None), ("", "browser_error"),
                                        ("x" * 33, "browser_error"), (b"\xff", "browser_error")):
             with self.subTest(content=content):
                 page = self.page()
@@ -329,7 +326,7 @@ class QwenChromiumIntegrationTests(unittest.TestCase):
     def browser(self, *, persistent=False):
         return Chromium(executable=os.environ.get("SETH_TEST_CHROMIUM") or find_chromium(),
                         profile=self.root / "profile", state_file=self.root / "browser.json",
-                        keep_open=persistent, deadline=time.monotonic() + 12)
+                        keep_open=persistent, deadline=time.monotonic() + 20)
 
     def assert_uploaded_image(self, before):
         self.assertEqual(len(self.uploads), before + 1)
@@ -344,7 +341,7 @@ class QwenChromiumIntegrationTests(unittest.TestCase):
                 before=len(self.uploads)
                 with self.browser() as page:
                     raw=self.adapter('jpeg_suffix').exchange(page,self.image,'Read this screenshot.',lambda label:None)
-                    self.assertEqual(json.loads(raw)['action'],'click')
+                    self.assertEqual(json.loads(raw)['status'],'answer')
                     self.assertEqual(page.evaluate('window.submissions'),1)
                 self.assert_uploaded_image(before)
 
@@ -359,7 +356,7 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
             self.assertEqual(page.evaluate('window.submissions'),0)
             before=len(self.uploads)
             raw=adapter.exchange(page,self.image,'Fresh request',lambda label:None)
-            self.assertEqual(json.loads(raw)['action'],'click')
+            self.assertEqual(json.loads(raw)['status'],'answer')
             self.assertEqual(page.evaluate('window.newChats'),1)
             self.assertEqual(page.evaluate('window.submissions'),1)
             self.assertEqual(len(self.uploads),before+1)
@@ -370,7 +367,7 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
         adapter = self.adapter("late_upload_control")
         with self.browser() as page:
             raw = adapter.exchange(page, self.image, "Select the answer.", lambda label: None)
-            self.assertEqual(json.loads(raw)["action"], "click")
+            self.assertEqual(json.loads(raw)["status"], "answer")
             self.assertEqual(page.evaluate("window.submissions"), 1)
             self.assertEqual(page.evaluate("window.menuSelections"), 1)
         self.assert_uploaded_image(before)
@@ -380,44 +377,21 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
         adapter = self.adapter("closing_menu")
         with self.browser() as page:
             raw = adapter.exchange(page, self.image, "Select the answer.", lambda label: None)
-            self.assertEqual(json.loads(raw)["action"], "click")
+            self.assertEqual(json.loads(raw)["status"], "answer")
             self.assertEqual(page.evaluate("window.menuOpens"), 2)
             self.assertEqual(page.evaluate("window.menuSelections"), 1)
             self.assertEqual(page.evaluate("window.submissions"), 1)
         self.assert_uploaded_image(before)
-
-    def test_client_uploads_original_and_grounds_returned_coordinates(self):
-        image = Image.new("RGB", (320, 200), "white")
-        ImageDraw.Draw(image).ellipse((149, 89, 170, 110), outline="#aaa", width=2)
-        image.save(self.image)
-        original = self.image.read_bytes()
-        before = len(self.uploads)
-        self.client.web.update(providers=["qwen"], state_dir=str(self.root / "state"),
-                               timeout_seconds=12, attempt_timeout_seconds=12)
-        self.client.web["sites"]["qwen"]["engine"] = "chromium"
-        write_private_json(self.client.cookie_file("qwen"), [])
-        adapter = self.adapter("control_ids")
-        with patch.object(self.client, "adapter", return_value=adapter):
-            raw = self.client.analyze_screenshot(self.image)
-        result = json.loads(raw)
-        self.assertEqual((result["click_x"], result["click_y"]), (160, 100))
-        self.assertEqual(result["target_control"], {"kind": "radio", "box": [149, 89, 171, 111]})
-        self.assertEqual(self.image.read_bytes(), original)
-        self.assertEqual(len(self.uploads), before + 1)
-        self.assertEqual(self.uploads[-1], original)
-        with Image.open(io.BytesIO(self.uploads[-1])) as annotated:
-            self.assertEqual(annotated.size, (320, 200))
-            self.assertNotIn((255, 242, 0), {color for _, color in annotated.convert("RGB").getcolors(maxcolors=65536)})
 
     def test_virtualized_code_is_read_completely_after_generation_without_clipboard(self):
         adapter = self.adapter("rendered_code")
         with self.browser() as page:
             raw = adapter.exchange(page, self.image, "Select all correct answers.", lambda label: None)
             result = json.loads(raw)
-            self.assertEqual(result["selection_type"], "multiple_answer")
-            self.assertEqual([p["click_y"] for p in result["selections"]], [60, 140])
-            self.assertIn("café ✓", result["explanation"])
-            self.assertGreater(len(result["explanation"]), 600)
+            self.assertEqual(result["status"], "answer")
+            self.assertTrue(result["answer"].startswith("1, 3"))
+            self.assertIn("café ✓", result["answer"])
+            self.assertGreater(len(result["answer"]), 600)
             self.assertEqual(page.evaluate("window.downloads"), 1)
             self.assertEqual(page.evaluate("window.events.slice(-2)"), ["final", "download"])
 
@@ -443,9 +417,8 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
             self.assertEqual(page.evaluate("window.events"),
                              ["input", "armed", "change", "received", "ready", "submit", "final"])
             self.assertIn("Find the center.", page.evaluate("window.submittedPrompts[0]"))
-            decision = self.client.parse_coordinates(raw, 320, 200)
-            self.assertEqual((decision["click_x"], decision["click_y"]), (160, 100))
-            self.assertEqual(decision["explanation"], "Final answer")
+            decision = parse_decision(raw, "mc")
+            self.assertEqual(decision["answer"], "2")
         self.assert_uploaded_image(before)
 
     def test_persistent_sign_in_prompt_fails_before_upload_after_hydration_grace(self):

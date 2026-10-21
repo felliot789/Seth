@@ -117,8 +117,6 @@ def install(config):
     if not command.is_symlink():
         command.symlink_to(ROOT / "seth")
     systemctl("daemon-reload")
-    # Replace the earlier listener-only desktop autostart without stopping it.
-    systemctl("disable", COMPONENTS["listener"])
     systemctl("enable", UNITS[0])
     write_json(installation_file(), {"root": str(ROOT), "config": str(config),
                "restart_listener": bool(running and changed or previous.get("restart_listener", False))})
@@ -218,10 +216,10 @@ def doctor(config):
         if state["status"] not in ("ready", "busy"):
             issues.append(f"{name}: {state['detail']}")
     if not os.access("/dev/uinput", os.R_OK | os.W_OK):
-        issues.append("No access to /dev/uinput. Install the udev/module rules described in README.md.")
+        issues.append("No access to /dev/uinput. Install the udev/module rules described in docs/setup.md.")
     import evdev
-    from hotkey import COLOR_LETTERS, CTRL, LETTERS, SELECT_LETTERS
-    required = LETTERS | SELECT_LETTERS | COLOR_LETTERS
+    from hotkey import COLOR_LETTERS, CTRL, FORMAT_LETTERS, INTERRUPT_LETTERS, LETTERS, SELECT_LETTERS
+    required = LETTERS | SELECT_LETTERS | COLOR_LETTERS | FORMAT_LETTERS | INTERRUPT_LETTERS
     keyboards = []
     selected = config.get("hotkey", {}).get("devices")
     for path in selected if selected is not None else evdev.list_devices():

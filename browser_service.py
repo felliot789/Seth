@@ -15,23 +15,18 @@ from urllib.parse import urlsplit
 
 from chromium_runtime import Chromium, close_managed_browser, managed_browser, reap_processes
 from inference import AIError
-from lightpanda_runtime import write_private_json
+from cdp import write_private_json
 from service_runtime import notify
 from settings import load_config
 from web_inference import SITES, WebInferenceClient
-from web_login import provider_cookies
 
 LOG = logging.getLogger("seth")
 
 
 def configured_providers(config):
-    """Include manual provider choices, even when absent from the fallback list."""
-    web = config.get("web", {})
-    client = WebInferenceClient(config)
-    candidates = dict.fromkeys([*web.get("sites", {}), *web.get("providers", ["gemini"])])
-    return [provider for provider in candidates if provider in SITES
-            and client.engine(provider) == "chromium"
-            and client.adapter(provider).options.get("keep_browser_open", False)]
+    """Keep only the two manually selected web providers."""
+    sites = config.get("web", {}).get("sites", {})
+    return [provider for provider in ("qwen", "gemini") if provider in sites]
 
 
 def status_file(config):
@@ -52,7 +47,7 @@ def matches_site(provider, url):
     host = urlsplit(url).hostname or ""
     expected = urlsplit(SITES[provider]["url"]).hostname
     return host == expected or any(host == domain or host.endswith("." + domain)
-                                   for domain in SITES[provider]["cookie_domains"])
+                                   for domain in SITES[provider]["login_domains"])
 
 
 class BrowserManager:
@@ -67,9 +62,6 @@ class BrowserManager:
         self.providers = {}
         for provider in configured_providers(config):
             self.groups.setdefault(self.client.login_profile(provider), []).append(provider)
-        if self.groups:
-            web = self.client.web | {"providers": [p for group in self.groups.values() for p in group]}
-            WebInferenceClient(config | {"web": web}).validate_config()
 
     @contextmanager
     def lock(self):
@@ -87,11 +79,15 @@ class BrowserManager:
 
     def _tab(self, browser, provider, pages, state, primary, used):
         saved = managed_browser(self.client.native_state_file(provider), self.client.login_profile(provider))
+        reserved = {record["target_id"] for other in SITES if other != provider
+                    if (record := managed_browser(self.client.native_state_file(other),
+                                                  self.client.login_profile(other)))}
         target = next((p for p in pages if saved and p["targetId"] == saved.get("target_id")
                        and p["targetId"] not in used and (saved.get("owner") == "seth-browser.service"
                        or matches_site(provider, p.get("url", "")))), None)
         if target is None:
             target = next((p for p in pages if p["targetId"] not in used
+                           and p["targetId"] not in reserved
                            and matches_site(provider, p.get("url", ""))), None)
         if target is None and provider == primary:
             target = next((p for p in pages if p["targetId"] == state.get("target_id")
@@ -126,12 +122,6 @@ class BrowserManager:
             if snapshot["editors"] != 1 or snapshot["modelCount"] == 0:
                 return {"status": "starting", "detail": "Waiting for the chat page"}
             adapter.verify_model(snapshot)
-            previous = self.providers.get(provider, {}).get("status")
-            if previous != "ready" or not self.client.cookie_file(provider).exists():
-                cookies = provider_cookies(provider, browser.call("Network.getAllCookies").get("cookies", []))
-                if not cookies:
-                    return {"status": "needs login", "detail": "Sign in in the existing browser tab"}
-                write_private_json(self.client.cookie_file(provider), cookies)
             return {"status": "ready", "detail": "Login, model and thinking selection verified"}
         except AIError as error:
             label = {"browser_login": "needs login", "browser_model": "wrong model",
