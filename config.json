@@ -27,7 +27,7 @@
         "thinking_label": ""
       },
       "qwen": {
-        "model_label": "Qwen3.8-Max",
+        "model_label": "Qwen3.8-OmniFlash",
         "thinking_label": "Thinking"
       }
     }
