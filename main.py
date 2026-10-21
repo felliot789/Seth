@@ -196,7 +196,8 @@ class SethEngine:
                 raw = self.ai.analyze_screenshot(frame.path, context_images=navigation.contexts,
                                                  control_regions=question.regions, scroll_targets=navigation.payload)
                 self._check_cancelled()
-                decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height, scroll_navigation=True)
+                decision = self.ai.parse_coordinates(raw, frame.display.width, frame.display.height,
+                                                     control_targets=navigation.controls, scroll_navigation=True)
             else:
                 raw = (self.ai.analyze_screenshot(frame.path, context_images=question.contexts, control_regions=question.regions)
                        if question is not None and question.contexts else
@@ -340,7 +341,7 @@ def main():
     parser.add_argument("--backend", choices=("api", "web", "gemini_web"), help="Override inference backend for this process")
     parser.add_argument("--mode", choices=("once", "listen", "trigger", "manual", "test", "status", "capture"), default="once",
                         help="once/manual/test perform one cycle; listen/trigger use host requests; status/capture never call inference or click")
-    parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 10 clicks (default: dry run)")
+    parser.add_argument("--execute", action="store_true", help="Enable the current question's selections, at most 64 clicks (default: dry run)")
     parser.add_argument("--hotkey", action="store_true", help="Enable run, provider, and capture shortcuts in listen mode (starts API / Single)")
     parser.add_argument("--overlay", action="store_true", help="Show a host indicator; Ctrl+Shift+D+F cycles modes, Ctrl+Shift+Q+W toggles text color (requires --hotkey)")
     parser.add_argument("--delay", type=float, default=0,

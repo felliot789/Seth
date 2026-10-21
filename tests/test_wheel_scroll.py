@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 
+from control_targets import catalog_controls
 from inference import DecisionClient
 from main import SethEngine
 from scroll_capture import ScrollCollector, ScrollLayoutError, ScrollLimitError, find_scrollbars
@@ -133,14 +134,22 @@ class WheelScrollTests(unittest.TestCase):
         engine = SethEngine(vm.config, execute=True, manual_selection=True)
         engine.capture, engine.clicker.backend = vm, vm
         engine.toggle_capture()
-        raw = {'action': 'select', 'selection_type': 'multiple_answer', 'confidence': .99,
-               'explanation': 'Last option.', 'selections': [{'option': 'Last', 'target_id': '06'}]}
-        def infer(path, *, context_images, control_regions, scroll_targets):
-            self.assertGreater(len(context_images), 1)
-            return json.dumps(DecisionClient().parse_coordinates(json.dumps(raw), 840, 620,
-                                                                control_targets=scroll_targets['controls']))
+        def infer(upload, prompt, response_format):
+            # Exercise the real unbadged upload, parser, local mapping, and
+            # engine reparse rather than replacing the whole provider wrapper.
+            self.assertNotIn('target_id', prompt)
+            self.assertNotIn('badge', prompt)
+            with Image.open(upload) as image:
+                controls = catalog_controls(image)
+                self.assertGreater(image.height, 620)
+                left, top, right, bottom = list(controls.values())[-1]['box']
+            return json.dumps({'action': 'select', 'selection_type': 'multiple_answer',
+                               'coordinate_space': 'pixels', 'confidence': .99,
+                               'explanation': 'Last option.', 'selections': [
+                                   {'option': 'Last', 'click_x': round((left + right - 1) / 2),
+                                    'click_y': round((top + bottom - 1) / 2)}]})
         with patch.object(engine.ai, 'inspect_layout', return_value=json.dumps(vm.layout)) as layout, \
-                patch.object(engine.ai, 'analyze_screenshot', side_effect=infer) as answer:
+                patch.object(engine.ai, '_analyze_screenshot', side_effect=infer) as answer:
             result = engine.run_cycle()
         self.assertEqual(result['status'], 'clicked', result)
         self.assertTrue(result['clicks'][0]['selection_verified'])

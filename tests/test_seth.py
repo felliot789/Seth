@@ -627,8 +627,8 @@ class HTTPTests(unittest.TestCase):
                     SethAIClient(configuration(root)).analyze_screenshot(path, prompt="Return the answer in original pixel coordinates.")
                 post.assert_not_called()
 
-    def test_scroll_context_uploads_one_combined_png_and_maps_ids_to_the_live_frame(self):
-        answer = {'action': 'click', 'target_id': '01', 'confidence': .95, 'explanation': 'B'}
+    def test_scroll_context_uploads_one_combined_png_and_maps_coordinates_to_the_live_frame(self):
+        answer = {'action': 'click', 'coordinate_space': 'pixels', 'click_x': 180, 'click_y': 264, 'confidence': .95, 'explanation': 'B'}
         event = lambda obj: 'data: ' + json.dumps(obj) + '\n\n'
         stream = (event({'choices': [{'delta': {'content': json.dumps(answer)}}]})
                   + event({'choices': [{'delta': {}, 'finish_reason': 'stop'}]}) + 'data: [DONE]\n\n')
@@ -645,7 +645,7 @@ class HTTPTests(unittest.TestCase):
                 client = SethAIClient(config)
                 raw = client.analyze_screenshot(path, context_images=[{'path': path, 'box': (0, 0, 160, 80)}],
                                                control_regions=[(160, 40, 240, 150)])
-                result = client.parse_coordinates(raw, 320, 200)
+                result = json.loads(raw)
                 self.assertEqual((result['click_x'], result['click_y']), (180, 100))
                 self.assertEqual(result['target_control']['box'], [169, 89, 191, 111])
                 self.assertTrue(client.last_grounded)
@@ -661,7 +661,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_scroll_context_invalid_control_is_rejected_after_one_request(self):
         with tempfile.TemporaryDirectory() as root, LocalAPI(decision={
-                'action': 'click', 'target_id': '99', 'confidence': .99, 'explanation': 'Bad ID'}) as api:
+                'action': 'click', 'coordinate_space': 'pixels', 'click_x': 5, 'click_y': 5, 'confidence': .99, 'explanation': 'Unsupported point'}) as api:
             path = Path(root) / 'question.png'
             Image.new('RGB', (320, 200), 'white').save(path)
             config = configuration(root)
@@ -964,12 +964,7 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
                 env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
                        "SETH_TEST_VBOX_LOG": str(log),
                        "SETH_TEST_CONTROL_KIND": "checkbox" if plan["selection_type"] == "multiple_answer" else "radio"}
-                labeled = {key: value for key, value in plan.items() if key != "coordinate_space"}
-                labeled["selections"] = [
-                    {key: value for key, value in point.items() if key not in ("click_x", "click_y")} |
-                    {"target_id": f"{(point['click_y'] - 60) // 40 + 1:02d}"}
-                    for point in plan["selections"]]
-                with patch.dict(os.environ, env), LocalAPI(decision=labeled) as api:
+                with patch.dict(os.environ, env), LocalAPI(decision=plan) as api:
                     config = configuration(root)
                     config["api"]["base_url"] = api.url
                     engine = SethEngine(config, execute=True)
@@ -990,8 +985,7 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
             log = root / "sdk.jsonl"
             env = {"PYTHONPATH": os.pathsep.join((str(root), str(Path(__file__).parent.resolve()))),
                    "SETH_TEST_VBOX_LOG": str(log)}
-            labeled = {key: value for key, value in DECISION.items() if key not in ("coordinate_space", "click_x", "click_y")} | {"target_id": "02"}
-            with patch.dict(os.environ, env), LocalAPI(decision=labeled) as api:
+            with patch.dict(os.environ, env), LocalAPI(decision=DECISION) as api:
                 config = configuration(root)
                 config["api"]["base_url"] = api.url
                 engine = SethEngine(config, execute=True)
@@ -1010,16 +1004,16 @@ class VirtualBoxIntegrationTests(unittest.TestCase):
                 self.assertEqual(route, "/v1/chat/completions")
                 self.assertEqual(auth, "Bearer local-test-key")
                 self.assertIs(payload["stream"], False)
-                self.assertIn('"02": "radio"', payload["messages"][0]["content"][0]["text"])
+                self.assertIn('coordinate_space', payload["messages"][0]["content"][0]["text"])
                 encoded = payload["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
                 with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
                     self.assertEqual(image.size, (320, 200))
                 baseline = min((root / "captures").glob("*.png"), key=lambda path: path.stat().st_mtime_ns)
                 self.assertEqual(baseline.stat().st_mode & 0o777, 0o600)
                 with Image.open(baseline) as original, Image.open(io.BytesIO(base64.b64decode(encoded))) as upload:
-                    # Badge upload changes a private copy, preserving raw captures.
+                    # The original capture is uploaded without badges.
                     self.assertEqual(original.getpixel((150, 100)), (255, 255, 255))
-                    self.assertNotEqual(original.tobytes(), upload.tobytes())
+                    self.assertEqual(original.tobytes(), upload.tobytes())
                 self.assertEqual(engine.cycle_count, 1)
                 # A listener worker also uses fresh helpers and remains a dry run.
                 engine.execute = False

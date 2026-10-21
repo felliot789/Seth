@@ -15,8 +15,8 @@ from urllib.parse import urlsplit
 import uuid
 
 from chromium_runtime import Chromium, close_managed_browser, find_chromium
-from control_targets import annotated_controls, ground_decision
-from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_size
+from control_targets import coordinate_capture, ground_capture_decision, ground_decision
+from inference import AIError, DecisionClient, build_prompt, screenshot_size
 from lightpanda_runtime import DEFAULT_BINARY, Lightpanda, install_lightpanda, write_private_json
 from settings import load_config
 
@@ -626,7 +626,7 @@ class WebInferenceClient(DecisionClient):
         self.last_grounded = False
         self.validate_config()
         if (context_images or scroll_targets is not None) and prompt:
-            raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
+            raise AIError("Scroll context requires the default coordinate prompt.", "browser_grounding")
         image_path = Path(image_path).resolve()
         width, height = screenshot_size(image_path)
         deadline = time.monotonic() + self.web.get("timeout_seconds", 240)
@@ -649,11 +649,15 @@ class WebInferenceClient(DecisionClient):
             attempt_deadline = min(deadline, time.monotonic() + self.web.get("attempt_timeout_seconds", 150))
             try:
                 labeled = prompt is None and not _layout
-                with annotated_controls(image_path, context_images=context_images,
+                with coordinate_capture(image_path, context_images=context_images,
                                         regions=control_regions,
-                                        scroll_targets=scroll_targets) if labeled else nullcontext((image_path, None)) as (upload, controls):
-                    request_prompt = prompt or (build_control_prompt(width, height, controls, scroll_context=bool(context_images),
-                                                                    scroll_navigation=scroll_targets is not None) if labeled
+                                        scroll_targets=scroll_targets) if labeled else nullcontext((image_path, None)) as (upload, mappings):
+                    upload_width, upload_height = screenshot_size(upload)
+                    context_prompt = ("This image contains one question across scroll captures. Read every section. "
+                                      "Coordinates refer to the ENTIRE uploaded image, including headers. "
+                                      + ("Answer controls in any section are selectable. " if scroll_targets is not None else
+                                         "Only answer controls in the bottom LIVE ANSWER VIEW are selectable. ")) if context_images or scroll_targets else ""
+                    request_prompt = prompt or (context_prompt + build_prompt(upload_width, upload_height) if labeled
                                                 else self.adapter(provider).build_prompt(width, height))
                     raw = self._run(provider, attempt_deadline, lambda adapter, page: adapter.exchange(
                         page, upload, request_prompt, self._report))
@@ -661,7 +665,9 @@ class WebInferenceClient(DecisionClient):
                         self.last_provider = provider
                         LOG.info('Layout inspection completed using %s', provider)
                         return raw
-                    decision = self.parse_coordinates(raw, width, height, control_targets=controls)
+                    decision = self.parse_coordinates(raw, upload_width, upload_height)
+                    if decision is not None and labeled:
+                        decision = ground_capture_decision(image_path, decision, mappings, regions=control_regions)
                 if decision is not None and (labeled or provider == "qwen"):
                     raw = json.dumps(decision if labeled else ground_decision(image_path, decision))
                 self.last_provider = provider

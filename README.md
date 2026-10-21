@@ -510,10 +510,9 @@ cancels clicking that has not been dispatched. After an unclean shutdown, the
 next listener automatically recovers its abandoned socket. It refuses to replace
 a socket with a live listener or any unrelated file.
 
-Default API, Gemini and Qwen requests use numbered answer-control IDs in both
-Single and Scroll mode. Seth resolves those IDs against the original control
-outlines. Explicit custom prompts can still return normalized or pixel points;
-execution grounds every point to a supported unchecked control before any input.
+Default API, Gemini and Qwen requests return answer coordinates in both
+Single and Scroll mode. Providers see the original answer pixels without badges.
+Seth maps those points to supported unchecked controls before any input.
 Contradictory single-click and multi-selection fields reject the whole response.
 The SDK adapter accounts for the monitor's origin and VirtualBox's one-based
 mouse coordinates. Each frame records the VM UUID, session PID, state-change
@@ -525,11 +524,16 @@ is 300, allowing for the 240-second inference response budget;
 `clicker.delay_ms` defaults to `[200, 800]`. Clicks use the exact selected
 pixel without jitter or simulated host cursor movement.
 
-Each provider receives a temporary copy of the screenshot with numbered badges over
-supported unchecked controls. It returns badge IDs; Seth calculates click pixels
-from the original control outlines. The original VM capture stays unchanged.
-Unknown IDs, wrong control types, and duplicate controls reject the whole plan
-before input. The current local detector supports radios 16–34 pixels across
+In Single mode, each provider receives the original screenshot. The prompt asks
+for coordinates on an explicit 0–1000 grid over the entire uploaded image;
+responses can also explicitly declare original pixel coordinates. Seth checks
+each point against a nearby control and clicks its verified center.
+In Scroll mode, coordinates refer to the complete combined upload, including
+its section headers. Seth maps each point inside a recorded answer control back
+to its original capture and scroll position. Internal control IDs track those
+positions; the model does not see or return them.
+Missing or ambiguous controls, wrong control types, and duplicate targets reject
+the whole plan before input. The current local detector supports radios 16–34 pixels across
 and checkboxes 12–34 pixels across on a sufficiently uniform background.
 After each click, a fresh capture must show the control's interior selected;
 otherwise the cycle stops without retrying the click. Confirmed clicks include
@@ -540,10 +544,15 @@ before the visual check. A native control's persistent focus rectangle may remai
 Seth allows a bounded six-pixel focus margin only while the filled interior,
 control outline, and surrounding context still confirm selection. Control detection
 uses each candidate's local background so alternating table rows retain their IDs.
-Up to 64 controls can receive badges; an answer plan can select at most ten.
+Up to 64 controls can be indexed; an answer plan can select at most 64 distinct controls.
 Single mode also clears hover before its initial inference capture and requires
 a settled baseline. Before each click, it verifies the complete visible question
 and answer content, allowing only previously confirmed control/focus changes.
+A baseline selected native blue control may also blink its bounded focus halo;
+its selected interior must remain unchanged. The observed Indonesian
+"Hapus pilihan saya" insertion is recognized by its native label pixels and an
+exact translation of the existing footer, with a matching native thumb resize.
+Other footer text, themes, or reflows remain unsupported and stop the cycle.
 A locally verified native browser viewport excludes the desktop clock while
 browser chrome remains an identity check. Without that geometry, the complete
 frame must remain stable. Changed or unsupported dynamic content stops the run.
@@ -551,8 +560,9 @@ After the last click, prior confirmed selections are checked again.
 Scroll capture uses the same pointer position for its baseline.
 A failed confirmation still stops the plan without a
 second click. Partial-plan errors retain the inferred decision and confidence.
-Explicit custom coordinate prompts use a conservative local check
-within 24 pixels of each predicted point; missing or ambiguous controls stop input.
+Single coordinates use a conservative local check within 24 pixels of each
+predicted point. Combined-image coordinates must fall inside a recorded control;
+points in section headers, reference-only captures, or blank space stop input.
 
 For long questions, **Ctrl+Shift+E+R** selects Scroll
 capture for API, Gemini, or Qwen. In nonmanual runs,
@@ -592,11 +602,11 @@ Before the first answer selection, Seth revisits a recorded section of each
 scrolling question area to recheck content that may now be off-screen.
 The captured question uses one private PNG upload. For whole-page wheel capture
 without fixed overlays, verified overlaps are removed to reconstruct one
-continuous page at its original resolution. Diagrams remain intact and each
-answer receives one badge. Other layouts retain the overlapping sections and
-final screen. Supported answer controls receive
-stable numbered IDs across the sections: overlapping copies of one control
-have the same ID. One inference request can select graph-based MCMA options or
+continuous page at its original resolution. Diagrams and answer controls remain
+unmodified. Other layouts retain the overlapping sections and final screen.
+Supported answer controls have stable internal identities across the sections:
+overlapping copies of one control resolve to the same target. One inference
+request can select graph-based MCMA options or
 categorize table rows spread across different scroll positions. The current
 configuration bounds collection to 32
 views total across the areas, preserving at least 35% overlap. A question that

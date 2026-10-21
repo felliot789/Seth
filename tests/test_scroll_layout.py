@@ -496,7 +496,7 @@ class LayoutProviderTests(unittest.TestCase):
             image.save(path)
             controls = {'01': {'kind': 'radio', 'box': [49, 49, 71, 71], 'target_view': 'live'}}
             client = SethAIClient({})
-            raw = json.dumps({'action': 'click', 'target_id': '01', 'confidence': .99, 'explanation': 'Fixture'})
+            raw = json.dumps({'action': 'click', 'coordinate_space': 'pixels', 'click_x': 60, 'click_y': 60, 'confidence': .99, 'explanation': 'Fixture'})
             with patch.object(client, 'validate_config'), patch.object(client, '_analyze_screenshot', return_value=raw):
                 result = json.loads(client.analyze_screenshot(path, context_images=[],
                                     scroll_targets={'controls': controls, 'live_controls': controls}))

@@ -1,13 +1,95 @@
 """A neutral Single capture and whole-question checks between selections."""
 
 from dataclasses import replace
+from pathlib import Path
 import time
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageChops
 
-from control_targets import CONTROL_HALO, selection_visible
+from control_targets import (CONTROL_HALO, CONTRAST, selection_visible, _background,
+                             _small_components, _control_shapes, _outline, _interior,
+                             _separated_outline)
 from scroll_capture import find_scrollbars
 from vbox_backend import VMError, validate_age
+
+
+def _selected_controls(image, *, include_unchecked=False):
+    """Find existing native radio/checkbox selections without trusting model output."""
+    gray = image.convert('L')
+    rgb = image.convert('RGB')
+    background = _background(gray)
+    controls, unchecked = [], []
+    for component in _small_components(gray, background):
+        for candidate, box, local_background in _control_shapes(gray, component, background):
+            for kind in ('radio', 'checkbox'):
+                if not _outline(candidate, box, kind):
+                    continue
+                interior = list(_interior(box, kind))
+                filled = sum(abs(gray.getpixel(point) - local_background) >= CONTRAST
+                             for point in interior)
+                blue = sum(rgb.getpixel(point)[2] - rgb.getpixel(point)[0] >= 60
+                           for point in interior)
+                if filled <= .03 * len(interior) and _separated_outline(gray, box, local_background):
+                    unchecked.append({'kind': kind, 'box': list(box)})
+                if filled >= .2 * len(interior) and blue >= .2 * len(interior):
+                    controls.append({'kind': kind, 'box': list(box)})
+                break
+    return (controls, unchecked + controls) if include_unchecked else controls
+
+
+def _mask_existing_focus(image, controls):
+    # Preserve the entire original control, including its selected interior.
+    for control in controls:
+        left, top, right, bottom = control['box']
+        original = image.crop((left, top, right, bottom))
+        ImageDraw.Draw(image).rectangle((left - CONTROL_HALO, top - CONTROL_HALO,
+                                       right + CONTROL_HALO - 1, bottom + CONTROL_HALO - 1), fill='white')
+        image.paste(original, (left, top))
+
+
+def _clear_choice_expansion(before, after, region, controls):
+    """Recognize the observed native footer transition without omitting content.
+
+    The two small templates contain only public UI labels and panel borders.
+    Native fractional layout rerasterizes these labels, so a translated-pixel
+    comparison cannot safely recognize this transition. Other layouts/languages
+    fail closed. Every changed content pixel must belong to this exact pair.
+    """
+    difference = ImageChops.difference(before.crop(region), after.crop(region)).getbbox()
+    if not difference or not controls:
+        return False
+    left, top, right, bottom = difference
+    box = (left + region[0], top + region[1], right + region[0], bottom + region[1])
+    if max(control['box'][3] + CONTROL_HALO for control in controls) >= box[1]:
+        return False
+    directory = Path(__file__).parent / 'assets' / 'native_controls'
+    for image, name in ((before, 'clear_choice_before.png'), (after, 'clear_choice_after.png')):
+        with Image.open(directory / name) as source:
+            template = source.convert('RGB')
+        crop = image.crop(box)
+        if crop.size != template.size or crop.tobytes() != template.tobytes():
+            return False
+    return True
+
+
+def _matching_scrollbar_resize(before, after, old):
+    candidates = [bar for bar in find_scrollbars(after)
+                  if bar.viewport == old.viewport and bar.top == old.top
+                  and bar.bottom == old.bottom and bar.panel == old.panel
+                  and bar.thumb[0::2] == old.thumb[0::2]]
+    if len(candidates) != 1:
+        return False
+    new = candidates[0]
+    if not (new.thumb[1] <= old.thumb[1] and new.thumb[3] <= old.thumb[3]
+            and new.thumb[3] - new.thumb[1] < old.thumb[3] - old.thumb[1]):
+        return False
+    box = (old.thumb[0], old.viewport[0], before.width, old.viewport[1])
+    a, b = before.crop(box), after.crop(box)
+    union = (0, min(old.thumb[1], new.thumb[1]) - box[1],
+             old.thumb[2] - box[0], max(old.thumb[3], new.thumb[3]) - box[1])
+    for image in (a, b):
+        ImageDraw.Draw(image).rectangle((union[0], union[1], union[2] - 1, union[3] - 1), fill='white')
+    return a.tobytes() == b.tobytes()
 
 
 class SingleQuestion:
@@ -19,12 +101,14 @@ class SingleQuestion:
         self.identity = []
         with Image.open(frame.path) as image:
             bars = find_scrollbars(image)
+            self.existing, self.controls = _selected_controls(image, include_unchecked=True)
         # A locally recognized native outer viewport excludes the desktop clock.
         # Keep browser chrome as identity, rather than trusting the target alone.
         outer = [bar for bar in bars if bar.viewport
                  and bar.thumb[0] >= frame.display.width * .95
                  and 32 <= bar.viewport[0] <= frame.display.height * .25
                  and bar.viewport[1] >= frame.display.height * .75]
+        self.outer = outer[0] if len(outer) == 1 else None
         if len(outer) == 1:
             top, bottom = outer[0].viewport
             self.regions = [(0, top, outer[0].thumb[0], bottom)]
@@ -41,6 +125,7 @@ class SingleQuestion:
     def _content(self, frame):
         with Image.open(frame.path) as source:
             image = source.convert('RGB')
+        _mask_existing_focus(image, self.existing)
         return b''.join(image.crop(box).tobytes() for box in self.identity + self.regions)
 
     def verify(self):
@@ -58,12 +143,18 @@ class SingleQuestion:
             if not selection_visible(before, after, control):
                 raise VMError('A previously confirmed answer changed; no further input.')
         for image in (before, after):
+            _mask_existing_focus(image, self.existing)
             draw = ImageDraw.Draw(image)
             for point in self.selected:
                 left, top, right, bottom = point['target_control']['box']
                 draw.rectangle((left - CONTROL_HALO, top - CONTROL_HALO,
                                 right + CONTROL_HALO - 1, bottom + CONTROL_HALO - 1), fill='white')
-        for box in self.identity + self.regions:
+        expanded = bool(self.selected and self.outer and
+                        _clear_choice_expansion(before, after, self.regions[0], self.controls))
+        if expanded and not _matching_scrollbar_resize(before, after, self.outer):
+            expanded = False
+        boxes = self.identity[:1] if expanded else self.identity + self.regions
+        for box in boxes:
             if before.crop(box).tobytes() != after.crop(box).tobytes():
                 raise VMError('Question or answer content changed after inference; start a fresh cycle.')
         # Keep the inference deadline even though execution uses fresh pixels.

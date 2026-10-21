@@ -165,24 +165,24 @@ class WebClientTests(unittest.TestCase):
                 with Image.open(upload) as image:
                     self.assertEqual(image.width, 320)
                     self.assertGreater(image.height, 200)
-                self.assertIn("ONE question at different scroll positions", prompt)
-                self.assertIn("outside it, return action none", prompt)
-                self.assertIn('"01": "radio"', prompt)
-                self.assertNotIn('"02":', prompt)
-                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"B"}'
+                self.assertIn("one question across scroll captures", prompt)
+                self.assertIn("Only answer controls in the bottom LIVE ANSWER VIEW are selectable", prompt)
+                self.assertIn("coordinate_space", prompt)
+                self.assertNotIn("target_id", prompt)
+                return '{"action":"click","coordinate_space":"pixels","click_x":180,"click_y":264,"confidence":0.95,"explanation":"B"}'
             adapter.exchange.side_effect = exchange
             return operation(adapter, None)
         with patch.object(self.client, "_run", side_effect=run):
             raw = self.client.analyze_screenshot(self.image, context_images=contexts,
                                                  control_regions=[(160, 40, 240, 150)])
-        result = self.client.parse_coordinates(raw, 320, 200)
+        result = json.loads(raw)
         self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
         self.assertEqual(self.client.last_provider, "qwen")
         self.assertEqual(self.client.last_attempts, [{"provider": "chatgpt", "error_code": "browser_context"}])
         self.assertEqual(self.image.read_bytes(), original)
         self.assertFalse(uploads[0].exists())
 
-    def test_gemini_scroll_context_uses_the_same_numbered_controls_and_live_pixels(self):
+    def test_gemini_scroll_context_maps_uploaded_coordinates_to_live_pixels(self):
         self.client.web['providers'] = ['gemini']
         with Image.open(self.image) as image:
             ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
@@ -197,14 +197,14 @@ class WebClientTests(unittest.TestCase):
                 with Image.open(upload) as image:
                     self.assertGreater(image.height, 200)
                 self.assertIn('LIVE ANSWER VIEW', prompt)
-                self.assertIn('"01": "radio"', prompt)
-                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"B"}'
+                self.assertIn("coordinate_space", prompt)
+                return '{"action":"click","coordinate_space":"pixels","click_x":180,"click_y":264,"confidence":0.95,"explanation":"B"}'
             adapter.exchange.side_effect = exchange
             return operation(adapter, None)
         with patch.object(self.client, '_run', side_effect=run):
             raw = self.client.analyze_screenshot(self.image, context_images=contexts,
                                                  control_regions=[(160, 40, 240, 150)])
-        result = self.client.parse_coordinates(raw, 320, 200)
+        result = json.loads(raw)
         self.assertEqual((result['click_x'], result['click_y']), (180, 100))
         self.assertTrue(self.client.last_grounded)
         self.assertEqual(self.client.last_provider, 'gemini')
@@ -218,13 +218,13 @@ class WebClientTests(unittest.TestCase):
         raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 167, "click_y": 97,
                           "confidence": .95, "explanation": "Option D."})
         with patch.object(self.client, "_run", return_value=raw):
-            grounded = self.client.parse_coordinates(self.client.analyze_screenshot(
-                self.image, prompt="Return original pixel coordinates."), 320, 200)
+            grounded = json.loads(self.client.analyze_screenshot(
+                self.image, prompt="Return original pixel coordinates."))
         self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
         self.assertEqual(grounded["model_point"], {"space": "pixels", "x": 167, "y": 97})
         self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
 
-    def test_default_qwen_upload_uses_ids_and_local_pixels_and_cleans_annotated_copy(self):
+    def test_default_qwen_upload_preserves_original_and_grounds_local_pixels(self):
         self.client.web["providers"] = ["qwen"]
         with Image.open(self.image) as image:
             draw = ImageDraw.Draw(image)
@@ -239,27 +239,24 @@ class WebClientTests(unittest.TestCase):
 
             def exchange(page, upload, prompt, report):
                 uploads.append(upload)
-                self.assertNotEqual(upload, self.image)
-                self.assertEqual(upload.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(upload.parent.stat().st_mode & 0o777, 0o700)
-                self.assertIn('"02": "radio"', prompt)
-                self.assertIn("Do not estimate or return coordinates", prompt)
+                self.assertEqual(upload, self.image.resolve())
+                self.assertIn("coordinate_space", prompt)
+                self.assertNotIn("target_id", prompt)
                 with Image.open(upload) as image:
                     self.assertEqual(image.size, (320, 200))
-                return json.dumps({"action": "click", "target_id": "02", "confidence": .95,
+                return json.dumps({"action": "click", "confidence": .95,
                                    "explanation": "The second option is correct.",
-                                   "coordinate_space": "pixels", "click_x": 90, "click_y": 40})
+                                   "coordinate_space": "pixels", "click_x": 180, "click_y": 100})
 
             adapter.exchange.side_effect = exchange
             return operation(adapter, None)
 
         with patch.object(self.client, "_run", side_effect=run):
-            grounded = self.client.parse_coordinates(self.client.analyze_screenshot(self.image), 320, 200)
+            grounded = json.loads(self.client.analyze_screenshot(self.image))
         self.assertEqual((grounded["click_x"], grounded["click_y"]), (180, 100))
-        self.assertEqual(grounded["target_id"], "02")
         self.assertEqual(grounded["target_control"], {"kind": "radio", "box": [169, 89, 191, 111]})
         self.assertEqual(self.image.read_bytes(), original)
-        self.assertFalse(uploads[0].exists())
+        self.assertTrue(uploads[0].exists())
 
     def test_missing_qwen_control_rejects_the_plan_and_allows_fallback(self):
         self.client.web["providers"] = ["qwen", "gemini"]
@@ -284,13 +281,13 @@ class WebClientTests(unittest.TestCase):
                              (self.image.resolve(), "Inspect question layout"))
             return result
         with patch.object(self.client, "_run", side_effect=run), \
-                patch("web_inference.annotated_controls") as annotate:
+                patch("web_inference.coordinate_capture") as annotate:
             self.assertEqual(self.client.inspect_layout(self.image, "Inspect question layout"),
                              '{"layout":"read only"}')
         annotate.assert_not_called()
         self.assertFalse(self.client.last_grounded)
 
-    def test_gemini_single_regions_exclude_outside_controls_from_ids(self):
+    def test_gemini_single_regions_exclude_outside_controls_from_grounding(self):
         self.client.web["providers"] = ["gemini"]
         with Image.open(self.image) as image:
             draw = ImageDraw.Draw(image)
@@ -300,29 +297,28 @@ class WebClientTests(unittest.TestCase):
         def run(provider, deadline, operation):
             adapter = MagicMock()
             def exchange(page, upload, prompt, report):
-                self.assertIn('"01": "radio"', prompt)
-                self.assertNotIn('"02": "radio"', prompt)
-                return '{"action":"click","target_id":"01","confidence":0.95,"explanation":"Answer"}'
+                self.assertIn("coordinate_space", prompt)
+                self.assertNotIn("target_id", prompt)
+                return '{"action":"click","coordinate_space":"pixels","click_x":250,"click_y":60,"confidence":0.95,"explanation":"Answer"}'
             adapter.exchange.side_effect = exchange
             return operation(adapter, None)
         with patch.object(self.client, "_run", side_effect=run):
             result = json.loads(self.client.analyze_screenshot(self.image, control_regions=[(200, 0, 320, 200)]))
         self.assertEqual((result["click_x"], result["click_y"]), (250, 60))
 
-    def test_default_gemini_uses_control_ids_and_rejects_coordinate_only_reply(self):
+    def test_default_gemini_uses_coordinates_and_rejects_id_only_reply(self):
         self.client.web["providers"] = ["gemini"]
         with Image.open(self.image) as image:
             ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline="#aaa", width=2)
             image.save(self.image)
-        raw = json.dumps({"action": "click", "target_id": "01", "confidence": .95,
+        raw = json.dumps({"action": "click", "coordinate_space": "pixels", "click_x": 180, "click_y": 100, "confidence": .95,
                           "explanation": "Option D."})
         with patch.object(self.client, "_run", return_value=raw):
             result = json.loads(self.client.analyze_screenshot(self.image))
         self.assertEqual((result["click_x"], result["click_y"]), (180, 100))
         self.assertTrue(self.client.last_grounded)
-        coordinates = json.dumps({"action": "click", "coordinate_space": "pixels",
-                                  "click_x": 180, "click_y": 100, "confidence": .95,
-                                  "explanation": "Coordinates alone are insufficient."})
+        coordinates = json.dumps({"action": "click", "target_id": "01", "confidence": .95,
+                                  "explanation": "IDs alone are insufficient."})
         with patch.object(self.client, "_run", return_value=coordinates), self.assertRaises(AIError):
             self.client.analyze_screenshot(self.image)
         self.assertFalse(self.client.last_grounded)
@@ -430,7 +426,7 @@ FIXTURE = r'''<!doctype html><html><body>
 <script>
 const scenario=SCENARIO;
 const answer=JSON.stringify(scenario==='control_ids'
- ?{action:'click',target_id:'01',confidence:0.99,explanation:'Center'}
+ ?{action:'click',coordinate_space:'pixels',click_x:180,click_y:264,confidence:0.99,explanation:'Center'}
  :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Center'});
 window.submissions=0;window.attachmentRemovals=0;
 document.querySelector('#new-chat').onclick=()=>{
@@ -612,7 +608,7 @@ document.head.append(s);})()""")
             self.assertIn('Fresh question',adapter.snapshot(page)['users'][0])
             self.assertEqual(WebInferenceClient({}).parse_coordinates(raw,320,200)['click_x'],160)
 
-    def test_client_scroll_context_upload_uses_ids_and_retains_live_coordinates(self):
+    def test_client_scroll_context_upload_maps_coordinates_to_live_controls(self):
         with Image.open(self.image) as image:
             ImageDraw.Draw(image).ellipse((169, 89, 190, 110), outline='#aaa', width=2)
             image.save(self.image)

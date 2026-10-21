@@ -36,13 +36,13 @@
         "engine": "chromium",
         "browser_profile": "qwen",
         "keep_browser_open": true,
-        "model_label": "Argon",
-        "thinking_label": "Medium"
+        "model_label": "Argon High",
+        "thinking_label": ""
       },
       "qwen": {
         "engine": "chromium",
         "keep_browser_open": true,
-        "model_label": "Qwen3.8-Omni-Flash",
+        "model_label": "Qwen3.8-Max",
         "thinking_label": "Thinking"
       }
     }

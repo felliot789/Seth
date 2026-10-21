@@ -69,7 +69,7 @@ def _interior(box, kind):
 def _outline(component, box, kind):
     left, top, right, bottom = box
     width, height = right - left, bottom - top
-    minimum = 16 if kind == "radio" else 12
+    minimum = 12
     if not (minimum <= min(width, height) <= max(width, height) <= MAX_DIAMETER
             and abs(width - height) <= (1 if kind == "radio" else 2)):
         return False
@@ -256,7 +256,7 @@ def _badge_controls(image, controls):
         draw.text((x - width / 2 - bx, y - height / 2 - by), identifier, font=font, fill='#111111')
 
 
-def _context_sheet(answer, contexts):
+def _context_sheet(answer, contexts, *, badges=True):
     if not isinstance(contexts, list) or not 1 <= len(contexts) <= MAX_SCROLL_VIEWS:
         raise AIError(f"Scroll context must contain one to {MAX_SCROLL_VIEWS} reference sections.", "browser_grounding")
     tiles = []
@@ -269,9 +269,9 @@ def _context_sheet(answer, contexts):
             if source.format not in ("PNG", "JPEG") or source.size != answer.size:
                 raise AIError("Scroll context must be PNG or JPEG and match the live answer frame dimensions.", "browser_grounding")
             source = source.convert('RGB')
-            if 'controls' in context:
+            if badges and 'controls' in context:
                 _badge_controls(source, context['controls'])
-            suffix = ' (answer IDs)' if 'controls' in context else ' (reference only)'
+            suffix = ' (answers)' if 'controls' in context else ' (reference only)'
             tiles.append((source.crop(box), str(context.get("label", "Question context"))[:100] + suffix))
     positions, x, y, row_height = [], 0, 0, 0
     for tile, label in tiles:
@@ -293,14 +293,14 @@ def _context_sheet(answer, contexts):
     for x, y, tile, label in positions:
         draw.text((x + 6, y + 5), label, font=font, fill="#0f172a")
         result.paste(tile, (x, y + 32))
-    heading = ('FINAL VIEW - yellow IDs in all sections are selectable' if any('controls' in c for c in contexts)
-               else 'LIVE ANSWER VIEW - choose only yellow badge IDs here')
+    heading = ('FINAL VIEW - answer controls in all sections are selectable' if any('controls' in c for c in contexts)
+               else 'LIVE ANSWER VIEW - choose answer controls here')
     draw.text((8, answer_y - 32), heading, font=font, fill="#0f172a")
     result.paste(answer, (0, answer_y))
     return result
 
 
-def _document_sheet(answer, document):
+def _document_sheet(answer, document, *, badges=True):
     """Remove verified overlap without scaling or cutting diagrams into tiles."""
     sections = document['sections']
     if not isinstance(sections, list) or not 2 <= len(sections) <= MAX_SCROLL_VIEWS:
@@ -339,8 +339,9 @@ def _document_sheet(answer, document):
         if not 0 <= left < right <= width or not 0 <= top < bottom <= height:
             raise AIError('Answer badge lies outside the complete question.', 'browser_grounding')
         controls[identifier] = control | {'box': [left, top + 36, right, bottom + 36]}
-    _badge_controls(result, controls)
-    ImageDraw.Draw(result).text((8, 8), 'COMPLETE QUESTION - read top to bottom; choose yellow badge IDs', fill='#0f172a')
+    if badges:
+        _badge_controls(result, controls)
+    ImageDraw.Draw(result).text((8, 8), 'COMPLETE QUESTION - read top to bottom', fill='#0f172a')
     return result
 
 
@@ -366,6 +367,87 @@ def annotated_controls(image_path, *, context_images=None, regions=None, scroll_
         image.save(path)
         path.chmod(0o600)
         yield path, controls
+
+
+@contextmanager
+def coordinate_capture(image_path, *, context_images=None, regions=None, scroll_targets=None):
+    """Unbadged upload and exact upload-space to original-control mappings."""
+    if not context_images and scroll_targets is None:
+        yield image_path, None
+        return
+    with Image.open(image_path) as original:
+        answer = original.convert('RGB')
+    originals = (scroll_targets['controls'] if scroll_targets is not None else
+                 catalog_controls(answer))
+    if regions is not None and scroll_targets is None:
+        originals = {key: c for key, c in originals.items() if any(
+            l <= c['box'][0] < c['box'][2] <= r and t <= c['box'][1] < c['box'][3] <= b
+            for l, t, r, b in regions)}
+    mappings = []
+    def add(controls, dx, dy, crop=None):
+        for identifier, control in controls.items():
+            box = control['box']
+            if crop is not None and not (crop[0] <= box[0] < box[2] <= crop[2]
+                                         and crop[1] <= box[1] < box[3] <= crop[3]):
+                continue
+            if identifier not in originals:
+                raise AIError('Capture control has no original target.', 'browser_grounding')
+            mappings.append({'upload_box': [box[0]+dx, box[1]+dy, box[2]+dx, box[3]+dy],
+                             'target_id': identifier, 'control': originals[identifier]})
+    if scroll_targets is not None and scroll_targets.get('document'):
+        document = scroll_targets['document']
+        image = _document_sheet(answer, document, badges=False)
+        add(document['controls'], 0, 36)
+    elif context_images:
+        image = _context_sheet(answer, context_images, badges=False)
+        x = y = row_height = 0
+        for context in context_images:
+            box = context['box']
+            width, height = box[2]-box[0], box[3]-box[1]
+            if x and x + width > answer.width:
+                x, y, row_height = 0, y + row_height + 12, 0
+            if scroll_targets is not None:
+                add(context.get('controls', {}), x-box[0], y+32-box[1], box)
+            x += width + 12
+            row_height = max(row_height, height+36)
+        add(scroll_targets['live_controls'] if scroll_targets is not None else originals,
+            0, y + row_height + 48)
+    else:
+        image = answer
+        add(scroll_targets['live_controls'], 0, 0)
+    with tempfile.TemporaryDirectory(prefix='seth-coordinates-') as directory:
+        path = Path(directory) / 'capture.png'
+        image.save(path)
+        path.chmod(0o600)
+        yield path, mappings
+
+
+def ground_capture_decision(image_path, decision, mappings, *, regions=None):
+    """Resolve all uploaded points before exposing any original-frame inputs."""
+    if mappings is None:
+        return ground_decision(image_path, decision, regions=regions)
+    result = deepcopy(decision)
+    points = result['selections'] if result['action'] == 'select' else [result]
+    expected = 'checkbox' if result.get('selection_type') == 'multiple_answer' else 'radio'
+    seen = set()
+    for point in points:
+        x, y = point['click_x'], point['click_y']
+        matches = [entry for entry in mappings if entry['upload_box'][0] <= x < entry['upload_box'][2]
+                   and entry['upload_box'][1] <= y < entry['upload_box'][3]]
+        if len(matches) != 1 or matches[0]['control']['kind'] != expected:
+            raise AIError('Point must lie inside one verified answer control.', 'browser_grounding')
+        entry = matches[0]
+        identifier, control = entry['target_id'], entry['control']
+        if identifier in seen:
+            raise AIError('Multiple answer points resolve to the same control.', 'browser_grounding')
+        seen.add(identifier)
+        l, t, r, b = control['box']
+        point.setdefault('model_point', {'space': 'pixels', 'x': x, 'y': y})
+        point.update(click_x=round((l+r-1)/2), click_y=round((t+b-1)/2),
+                     target_id=identifier, target_control={'kind': control['kind'], 'box': list(control['box'])})
+        if 'target_view' in control:
+            point['target_view'] = control['target_view']
+    return result
 
 
 def _surroundings_unchanged(before, after, box):

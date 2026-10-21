@@ -312,7 +312,7 @@ class ScrollNavigationTests(unittest.TestCase):
                           'explanation': 'Both.', 'selections': [{'option':'A','target_id':'01'}, {'option':'B','target_id':'02'}]})
         client = DecisionClient()
         result = client.parse_coordinates(raw, 720, 540, control_targets=controls)
-        self.assertEqual(client.parse_coordinates(json.dumps(result), 720, 540, scroll_navigation=True), result)
+        self.assertEqual(client.parse_coordinates(json.dumps(result), 720, 540, control_targets=controls, scroll_navigation=True), result)
         with self.assertRaises(AIError):
             client.parse_coordinates(json.dumps(result), 720, 540)
 
@@ -355,7 +355,7 @@ class ScrollNavigationTests(unittest.TestCase):
                 self.assertEqual(len(vm.drags), 5)
                 self.assertEqual(vm.clicks, [])
 
-    def test_api_gemini_and_qwen_upload_global_ids_and_preserve_view_metadata(self):
+    def test_api_gemini_and_qwen_upload_unbadged_coordinates_and_preserve_view_metadata(self):
         image = Image.new('RGB', (320, 200), 'white')
         draw_control(image, 'checkbox', (70, 60))
         source = self.root / 'input.png'
@@ -365,19 +365,23 @@ class ScrollNavigationTests(unittest.TestCase):
         controls = {'01':local | {'target_view':'1:0'}, '02':local | {'target_view':'1:2'}}
         payload = {'controls':controls, 'live_controls':{'02':local}}
         contexts = [{'path':source, 'box':(0,0,160,100), 'label':'Section 1', 'controls':{'01':local}}]
-        raw = json.dumps({'action':'select', 'selection_type':'multiple_answer', 'confidence':.99,
-                          'explanation':'Both options.', 'selections':[{'option':'A','target_id':'01'}, {'option':'B','target_id':'02'}]})
+        raw = json.dumps({'action':'select', 'selection_type':'multiple_answer', 'coordinate_space':'pixels',
+                          'confidence':.99, 'explanation':'Both options.',
+                          'selections':[{'option':'A','click_x':70,'click_y':92},
+                                        {'option':'B','click_x':70,'click_y':244}]})
         for provider in ('api','gemini','qwen'):
             with self.subTest(provider=provider):
                 uploads = []
                 def exchange(upload, prompt):
                     uploads.append(upload)
-                    self.assertIn('ALL sections are selectable', prompt)
+                    self.assertIn('Answer controls in any section are selectable', prompt)
+                    self.assertNotIn('target_id', prompt)
                     self.assertNotIn('outside it, return action none', prompt)
                     with Image.open(upload) as packed:
                         self.assertEqual(packed.format, 'PNG')
                         self.assertGreater(packed.height, 200)
-                        self.assertNotEqual(packed.crop((50,72,90,112)).tobytes(), image.crop((50,40,90,80)).tobytes())
+                        self.assertEqual(packed.crop((50,72,90,112)).tobytes(), image.crop((50,40,90,80)).tobytes())
+                        self.assertEqual(packed.crop((50,224,90,264)).tobytes(), image.crop((50,40,90,80)).tobytes())
                     return raw
                 if provider == 'api':
                     client = SethAIClient({'api':{'base_url':'http://127.0.0.1:1/v1','api_key':'test','model':'test'}})
@@ -397,7 +401,7 @@ class ScrollNavigationTests(unittest.TestCase):
                 with mocked as inference:
                     response = client.analyze_screenshot(source, context_images=contexts, scroll_targets=payload)
                     inference.assert_called_once()
-                result = client.parse_coordinates(response,320,200,scroll_navigation=True)
+                result = client.parse_coordinates(response,320,200,control_targets=controls,scroll_navigation=True)
                 self.assertEqual([point['target_view'] for point in result['selections']], ['1:0','1:2'])
                 self.assertEqual(source.read_bytes(), original)
                 self.assertFalse(uploads[0].exists())

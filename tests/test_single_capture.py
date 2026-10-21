@@ -15,7 +15,8 @@ from control_targets import catalog_controls
 from inference import DecisionClient
 from main import SethEngine
 from scroll_capture import Scrollbar
-from single_capture import prepare_single
+from single_capture import (prepare_single, _clear_choice_expansion,
+                            _selected_controls, _mask_existing_focus)
 from tests.test_control_targets import draw_control
 from vbox_backend import GuestDisplay, VMError
 
@@ -172,6 +173,57 @@ class SingleCaptureTests(unittest.TestCase):
         vm.option = 'Changed answer text'
         with self.assertRaisesRegex(VMError, 'content changed'):
             question.verify()
+
+
+class NativeSingleMutationTests(unittest.TestCase):
+    def footer_pair(self):
+        images = []
+        directory = Path(__file__).resolve().parents[1] / 'assets/native_controls'
+        for name in ('clear_choice_before.png', 'clear_choice_after.png'):
+            image = Image.new('RGB', (1200, 600), 'white')
+            with Image.open(directory / name) as footer:
+                image.paste(footer.convert('RGB'), (100, 350))
+            ImageDraw.Draw(image).text((120, 100), 'Question and unchanged answer', fill='black')
+            images.append(image)
+        return images
+
+    def test_known_footer_insertion_preserves_all_existing_question_pixels(self):
+        before, after = self.footer_pair()
+        controls = [{'kind': 'radio', 'box': [130, 200, 150, 220]}]
+        self.assertTrue(_clear_choice_expansion(before, after, (0, 0, 1200, 600), controls))
+        ImageDraw.Draw(after).text((120, 150), 'Changed other answer', fill='black')
+        self.assertFalse(_clear_choice_expansion(before, after, (0, 0, 1200, 600), controls))
+
+    def test_forged_footer_and_additional_control_are_rejected(self):
+        controls = [{'kind': 'radio', 'box': [130, 200, 150, 220]}]
+        for mutation in ('label', 'control'):
+            before, after = self.footer_pair()
+            if mutation == 'label':
+                ImageDraw.Draw(after).rectangle((200, 355, 220, 367), fill='black')
+            else:
+                draw_control(after, 'radio', (600, 380))
+            self.assertFalse(_clear_choice_expansion(before, after, (0, 0, 1200, 600), controls))
+
+    def test_insertion_above_remaining_control_is_rejected(self):
+        before, after = self.footer_pair()
+        controls = [{'kind': 'radio', 'box': [130, 400, 150, 420]}]
+        self.assertFalse(_clear_choice_expansion(before, after, (0, 0, 1200, 600), controls))
+
+    def test_existing_selection_focus_blink_preserves_control_interior(self):
+        before = Image.new('RGB', (180, 120), 'white')
+        draw_control(before, 'radio', (60, 60), selected=True)
+        selected = _selected_controls(before)
+        self.assertEqual(len(selected), 1)
+        after = before.copy()
+        ImageDraw.Draw(after).line((74, 46, 74, 74), fill='#88bbff')
+        _mask_existing_focus(before, selected)
+        _mask_existing_focus(after, selected)
+        self.assertEqual(before.tobytes(), after.tobytes())
+        draw_control(after, 'radio', (60, 60), selected=False)
+        # Explicitly erase the selected interior (drawing an outline alone does not).
+        ImageDraw.Draw(after).ellipse((55, 55, 64, 64), fill='white')
+        _mask_existing_focus(after, selected)
+        self.assertNotEqual(before.tobytes(), after.tobytes())
 
 
 if __name__ == '__main__':

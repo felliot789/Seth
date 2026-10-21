@@ -123,12 +123,12 @@ send.onclick=()=>{
    const final=document.createElement('div');final.className='response-message-content phase-answer';
    final.innerHTML='<div class="qwen-markdown"><pre><code></code></pre></div>';
    const decision=scenario==='control_ids'
-     ?{action:'click',target_id:'01',confidence:0.99,explanation:'Final answer'}
+     ?{action:'click',coordinate_space:'pixels',click_x:160,click_y:100,confidence:0.99,explanation:'Final answer'}
      :{action:'click',coordinate_space:'normalized_1000',click_x:500,click_y:500,confidence:0.99,explanation:'Final answer'};
    final.querySelector('code').textContent=JSON.stringify(decision);
    if(scenario==='rendered_code'){
-     const answer={action:'select',selection_type:'multiple_answer',selections:[
-       {option:'A',target_id:'01'},{option:'C',target_id:'03'}],confidence:0.99,
+     const answer={action:'select',selection_type:'multiple_answer',coordinate_space:'pixels',selections:[
+       {option:'A',click_x:160,click_y:60},{option:'C',click_x:160,click_y:140}],confidence:0.99,
        explanation:'Complete answer: café ✓ '+ 'proof '.repeat(100)};
      final.querySelector('.qwen-markdown').innerHTML='<pre class="qwen-markdown-code"><div class="qwen-markdown-code-header"><span>json</span><button aria-label="Download">Download</button></div><div class="qwen-markdown-code-editor-viewport">12345678910111213141516 {"action": "select", "selections": [</div></pre>';
      final.querySelector('[aria-label="Download"]').onclick=()=>{
@@ -386,7 +386,7 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
             self.assertEqual(page.evaluate("window.submissions"), 1)
         self.assert_uploaded_image(before)
 
-    def test_client_uploads_numbered_controls_and_resolves_the_returned_id(self):
+    def test_client_uploads_original_and_grounds_returned_coordinates(self):
         image = Image.new("RGB", (320, 200), "white")
         ImageDraw.Draw(image).ellipse((149, 89, 170, 110), outline="#aaa", width=2)
         image.save(self.image)
@@ -399,16 +399,15 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
         adapter = self.adapter("control_ids")
         with patch.object(self.client, "adapter", return_value=adapter):
             raw = self.client.analyze_screenshot(self.image)
-        result = self.client.parse_coordinates(raw, 320, 200)
+        result = json.loads(raw)
         self.assertEqual((result["click_x"], result["click_y"]), (160, 100))
-        self.assertEqual(result["target_id"], "01")
         self.assertEqual(result["target_control"], {"kind": "radio", "box": [149, 89, 171, 111]})
         self.assertEqual(self.image.read_bytes(), original)
         self.assertEqual(len(self.uploads), before + 1)
-        self.assertNotEqual(self.uploads[-1], original)
+        self.assertEqual(self.uploads[-1], original)
         with Image.open(io.BytesIO(self.uploads[-1])) as annotated:
             self.assertEqual(annotated.size, (320, 200))
-            self.assertIn((255, 242, 0), {color for _, color in annotated.convert("RGB").getcolors(maxcolors=65536)})
+            self.assertNotIn((255, 242, 0), {color for _, color in annotated.convert("RGB").getcolors(maxcolors=65536)})
 
     def test_virtualized_code_is_read_completely_after_generation_without_clipboard(self):
         adapter = self.adapter("rendered_code")
@@ -416,7 +415,7 @@ e.dispatchEvent(new Event('input',{bubbles:true}));})()""")
             raw = adapter.exchange(page, self.image, "Select all correct answers.", lambda label: None)
             result = json.loads(raw)
             self.assertEqual(result["selection_type"], "multiple_answer")
-            self.assertEqual([p["target_id"] for p in result["selections"]], ["01", "03"])
+            self.assertEqual([p["click_y"] for p in result["selections"]], [60, 140])
             self.assertIn("café ✓", result["explanation"])
             self.assertGreater(len(result["explanation"]), 600)
             self.assertEqual(page.evaluate("window.downloads"), 1)

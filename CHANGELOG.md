@@ -1,5 +1,19 @@
 # Development milestones
 
+## 2026-10-20 — Request coordinates without answer badges
+
+- Default API, Gemini, and Qwen requests use the original answer pixels and
+  explicitly declared coordinates. Single uploads preserve the original bytes.
+  Scroll uploads retain their complete diagrams and map upload coordinates to
+  locally recorded controls and original views before any answer input.
+- Preserve internal scroll identities without asking the model for numbered
+  IDs. Reject reference-only, ambiguous, duplicate, and unsupported targets as a
+  complete plan. Allow up to 64 selections, with a 12-answer MCMA regression.
+- Address the latest native Single false stops: baseline selected-control focus
+  blinking and the recognized Indonesian clear-choice link/footer expansion.
+  The latter requires unchanged existing content and matching scrollbar geometry;
+  other dynamic reflows still stop the cycle.
+
 ## 2026-10-20 — Repair all nine behavior audit findings
 
 - Ground default API and Gemini Single replies to numbered controls and confirm

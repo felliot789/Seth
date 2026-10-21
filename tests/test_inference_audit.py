@@ -13,7 +13,7 @@ class InferenceAuditTests(unittest.TestCase):
     def setUp(self):
         self.client = SethAIClient({"api": {"base_url": "https://example.invalid/v1",
                                   "api_key": "fake", "model": "fake"}})
-        self.answer = {"action": "click", "target_id": "01", "confidence": .95,
+        self.answer = {"action": "click", "coordinate_space": "pixels", "click_x": 60, "click_y": 60, "confidence": .95,
                        "explanation": "Answer"}
 
     def test_nonstream_requires_success_when_reason_is_present_and_plain_text(self):
@@ -60,14 +60,14 @@ class InferenceAuditTests(unittest.TestCase):
             draw.ellipse((239, 49, 260, 70), outline="#aaa", width=2)
             image.save(source)
             def exchange(upload, prompt, response_format=None):
-                self.assertIn('"01": "radio"', prompt)
-                self.assertNotIn('"02": "radio"', prompt)
-                return json.dumps(self.answer)
+                self.assertIn("coordinate_space", prompt)
+                self.assertNotIn("target_id", prompt)
+                return json.dumps(self.answer | {"click_x": 250})
             with patch.object(self.client, "_analyze_screenshot", side_effect=exchange):
                 result = json.loads(self.client.analyze_screenshot(source, control_regions=[(200, 0, 300, 200)]))
             self.assertEqual((result["click_x"], result["click_y"]), (250, 60))
 
-    def test_api_default_labels_once_and_layout_custom_prompts_keep_original(self):
+    def test_api_default_uses_original_coordinates_and_layout_custom_prompts_keep_original(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "source.png"
             image = Image.new("RGB", (160, 140), "white")
@@ -77,21 +77,21 @@ class InferenceAuditTests(unittest.TestCase):
             uploads = []
             def exchange(upload, prompt, response_format=None):
                 uploads.append(upload)
-                self.assertNotEqual(upload, source)
-                self.assertIn('"01": "radio"', prompt)
-                self.assertIn("Do not estimate or return coordinates", prompt)
+                self.assertEqual(upload, source)
+                self.assertIn("coordinate_space", prompt)
+                self.assertNotIn("target_id", prompt)
                 return json.dumps(self.answer)
             with patch.object(self.client, "_analyze_screenshot", side_effect=exchange) as request:
                 decision = json.loads(self.client.analyze_screenshot(source))
             request.assert_called_once()
             self.assertEqual((decision["click_x"], decision["click_y"]), (60, 60))
             self.assertTrue(self.client.last_grounded)
-            self.assertFalse(uploads[0].exists())
+            self.assertTrue(uploads[0].exists())
             self.assertEqual(source.read_bytes(), original)
             for operation in (self.client.analyze_screenshot, self.client.inspect_layout):
                 with patch.object(self.client, "_analyze_screenshot", return_value="layout") as request:
                     self.assertEqual(operation(source, "Read layout only"), "layout")
                     self.assertEqual(request.call_args.args[:2], (source, "Read layout only"))
-            with patch.object(self.client, "_analyze_screenshot", return_value=json.dumps(self.answer | {"target_id": "99"})), self.assertRaises(AIError):
+            with patch.object(self.client, "_analyze_screenshot", return_value=json.dumps(self.answer | {"click_x": 159, "click_y": 139})), self.assertRaises(AIError):
                 self.client.analyze_screenshot(source)
             self.assertFalse(self.client.last_grounded)

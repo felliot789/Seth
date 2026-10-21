@@ -75,7 +75,7 @@ def build_prompt(width, height, *, coordinate_space="normalized_1000"):
         "A checked box or selected control is already answered; leave it selected. "
         "A single radio option containing a combination of statements is still "
         "one single-choice answer, not several separate checkboxes. "
-        "Use at most 10 selections for this one question. Skip already selected "
+        "Include every required selection for this one question. Skip already selected "
         "answers; if existing selections are incorrect or any required answer is "
         "uncertain, return action none. Use the lowest confidence across the plan. "
         f"{coordinates}"
@@ -137,7 +137,7 @@ def build_control_prompt(width, height, controls, *, scroll_context=False, scrol
         "A single radio containing a combination of statements is still one answer. "
         "Identify the question type using its instructions and original control types. "
         "Preserve existing selected answers; judge their selected appearance, not just the lack of a badge. "
-        "Use at most 10 selections and the lowest confidence across the plan. "
+        "Use at most 64 selections and the lowest confidence across the plan. "
         'Return {"action":"none","confidence":0,"explanation":string} '
         "if any required answer or badge is uncertain, existing selections are incorrect, "
         "the question is fully answered, the computed answer matches no option, or "
@@ -199,6 +199,13 @@ class DecisionClient:
             if not isinstance(point, dict):
                 raise AIError("Each selection must be an object.")
             point = point.copy()
+            if control_targets is None:
+                # Only local grounding may attach trusted control identities.
+                # When coordinates are already in pixel space, the point has
+                # already been grounded locally and its fields are trusted.
+                if space != "pixels":
+                    for field in ('target_id', 'target_control', 'target_view', 'model_point'):
+                        point.pop(field, None)
             if control_targets is not None:
                 identifier = point.get("target_id")
                 control = control_targets.get(identifier) if isinstance(identifier, str) else None
@@ -235,8 +242,8 @@ class DecisionClient:
             selections = result.get("selections")
             if kind not in ("classification", "multiple_answer"):
                 raise AIError("Selection plan must identify classification or multiple_answer.")
-            if not isinstance(selections, list) or not 1 <= len(selections) <= 10:
-                raise AIError("Selection plan must contain between 1 and 10 targets.")
+            if not isinstance(selections, list) or not 1 <= len(selections) <= 64:
+                raise AIError("Selection plan must contain between 1 and 64 targets.")
             converted, labels, points = [], set(), set()
             for selection in selections:
                 point = convert(selection)

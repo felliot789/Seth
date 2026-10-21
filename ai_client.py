@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from inference import AIError, DecisionClient, build_control_prompt, build_prompt, screenshot_info, screenshot_size
+from inference import AIError, DecisionClient, build_prompt, screenshot_info, screenshot_size
 
 from settings import load_config
 
@@ -70,14 +70,20 @@ class SethAIClient(DecisionClient):
         if prompt is not None and not context_images and scroll_targets is None:
             return self._analyze_screenshot(image_path, prompt, response_format)
         if prompt:
-            raise AIError("Scroll context requires the default control-ID prompt.", "browser_grounding")
+            raise AIError("Scroll context requires the default coordinate prompt.", "browser_grounding")
         self.validate_config()
-        width, height = screenshot_size(image_path)
-        from control_targets import annotated_controls
-        with annotated_controls(image_path, context_images=context_images, regions=control_regions, scroll_targets=scroll_targets) as (upload, controls):
-            raw = self._analyze_screenshot(upload, build_control_prompt(width, height, controls, scroll_context=bool(context_images),
-                                                                      scroll_navigation=scroll_targets is not None), response_format)
-            decision = self.parse_coordinates(raw, width, height, control_targets=controls)
+        from control_targets import coordinate_capture, ground_capture_decision
+        with coordinate_capture(image_path, context_images=context_images, regions=control_regions,
+                                scroll_targets=scroll_targets) as (upload, mappings):
+            width, height = screenshot_size(upload)
+            context_prompt = ("This image contains one question across scroll captures. Read every section. "
+                              "Coordinates refer to the ENTIRE uploaded image, including headers. "
+                              + ("Answer controls in any section are selectable. " if scroll_targets is not None else
+                                 "Only answer controls in the bottom LIVE ANSWER VIEW are selectable. ")) if context_images or scroll_targets else ""
+            raw = self._analyze_screenshot(upload, context_prompt + build_prompt(width, height), response_format)
+            decision = self.parse_coordinates(raw, width, height)
+            if decision is not None:
+                decision = ground_capture_decision(image_path, decision, mappings, regions=control_regions)
         self.last_grounded = decision is not None
         return json.dumps(decision) if decision is not None else raw
 
