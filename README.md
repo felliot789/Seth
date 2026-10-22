@@ -33,13 +33,14 @@ seth up
 | Ctrl+Shift+S | Switch Single ↔ Scroll capture |
 | Ctrl+Shift+G | Cancel the current request |
 | Ctrl+Shift+D+F | Cycle indicator Full → Hidden → Dot → Full |
-| Ctrl+Shift+Q+W | Switch white/black indicator text |
+| Ctrl+Shift+Q+W | Cycle indicator text: white → light grey → grey → dark grey → black |
 
 Actions fire after you release the shortcut. Provider, format, and mode changes apply
 while idle, clear the previous answer, and send no request. On restart, Seth
 reads the starting choices from [config.json](config.json). The default capture
-mode is Single. For a long question, select Scroll with Ctrl+Shift+S, then press
-Ctrl+D+F. The selected mode appears in the Full indicator.
+mode is Single. The indicator text starts white; cycle its shade to adjust contrast
+against your desktop background. For a long question, select Scroll with
+Ctrl+Shift+S, then press Ctrl+D+F. The selected mode appears in the Full indicator.
 
 Scroll mode supports one standard whole-page scroll area, leaving the VM at the
 bottom when finished. It needs an absolute pointing device such as a VirtualBox

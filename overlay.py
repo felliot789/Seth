@@ -13,7 +13,10 @@ COLORS = {
     "no_action": "#fb923c", "uncertain": "#fb923c",
     "error": "#f87171", "cancelled": "#94a3b8",
 }
-TEXT_COLORS = {"white": "#ffffff", "black": "#000000"}
+TEXT_COLORS = {
+    "white": "#ffffff", "light grey": "#bfbfbf", "grey": "#808080",
+    "dark grey": "#404040", "black": "#000000",
+}
 
 
 def check_display(platform):
@@ -138,7 +141,8 @@ class SethOverlay:
                                 + "; font-size: 12px; font-weight: 500; background: transparent; border: none;")
 
     def toggle_text_color(self):
-        self.text_color = "black" if self.text_color == "white" else "white"
+        shades = tuple(TEXT_COLORS)
+        self.text_color = shades[(shades.index(self.text_color) + 1) % len(shades)]
         self._apply_text_color()
         self.app.processEvents()
         return self.text_color

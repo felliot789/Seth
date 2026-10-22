@@ -14,7 +14,7 @@ reachability check; it does not validate credentials or perform model inference.
 | Symptom | What to check |
 | --- | --- |
 | No response to the shortcut | Release every chord key. Check the listener, keyboard device permissions, and `/dev/uinput` access. Follow [shortcut setup](setup.md#shortcut-permissions). |
-| Indicator is invisible or only a dot | Cycle Ctrl+Shift+D+F to Full mode. Ctrl+Shift+Q+W changes text color. On Wayland, check XWayland and the desktop environment used to start Seth. |
+| Indicator is invisible or only a dot | Cycle Ctrl+Shift+D+F to Full mode. Ctrl+Shift+Q+W cycles white, light grey, grey, dark grey, and black text. On Wayland, check XWayland and the desktop environment used to start Seth. |
 | Wrong provider or question format | Select it while idle with Ctrl+E+R or Ctrl+Shift+Z. Changes during a running request are ignored. Startup choices come from the configuration. |
 | Long question is cut off | Use Ctrl+Shift+S to select Scroll, then Ctrl+D+F. Keep one question in one whole-page scroll area. |
 | Scroll overlap/settling error | Wait for loading/animation to finish and retry. Reduce guest wheel speed or use Single mode with the question fitted on screen. No incomplete batch is sent. |

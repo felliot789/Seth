@@ -44,8 +44,8 @@ class OverlayTests(unittest.TestCase):
 
     def setUp(self):
         self.overlay.display_mode = 'full'
-        if self.overlay.text_color != 'white':
-            self.overlay.toggle_text_color()
+        self.overlay.text_color = 'white'
+        self.overlay._apply_text_color()
         self.overlay._apply_mode()
         self.overlay.poll(('idle', 'Idle'))
 
@@ -84,11 +84,11 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(17, 18).alpha(), 0)
         self.assertNotEqual(COLORS['thinking'], COLORS['uncertain'])
 
-    def test_full_text_has_no_background_or_border_in_either_color(self):
+    def test_full_text_has_no_background_or_border_in_any_shade(self):
         overlay = self.overlay
-        for color in ('white', 'black'):
-            if overlay.text_color != color:
-                overlay.toggle_text_color()
+        for color, expected in (('white', '#ffffff'), ('light grey', '#bfbfbf'), ('grey', '#808080'),
+                                ('dark grey', '#404040'), ('black', '#000000')):
+            self.assertEqual(overlay.text_color, color)
             overlay.poll(('done', 'Done'), 'Gemini · Table')
             image = overlay.window.grab().toImage()
             for point in ((0, 0), (0, 19), (100, 3), (100, 34), (312, 19), (335, 37)):
@@ -96,7 +96,12 @@ class OverlayTests(unittest.TestCase):
             ink = [image.pixelColor(x, y) for y in range(image.height()) for x in range(13, 307)
                    if image.pixelColor(x, y).alpha() > 200]
             self.assertTrue(ink)
-            self.assertTrue(all(pixel.name() == ('#ffffff' if color == 'white' else '#000000') for pixel in ink))
+            # Unpremultiplying antialiased pixels can round a grey channel by one.
+            channel = int(expected[1:3], 16)
+            self.assertTrue(all(abs(component - channel) <= 1 for pixel in ink
+                                for component in pixel.getRgb()[:3]))
+            overlay.toggle_text_color()
+        self.assertEqual(overlay.text_color, 'white')
 
     def test_text_color_toggle_preserves_display_mode_status_and_dot(self):
         overlay = self.overlay
@@ -106,7 +111,7 @@ class OverlayTests(unittest.TestCase):
             overlay.display_mode = mode
             overlay._apply_mode()
             visible = overlay.window.isVisible()
-            for expected in ('black', 'white'):
+            for expected in ('light grey', 'grey', 'dark grey', 'black', 'white'):
                 self.assertEqual(overlay.toggle_text_color(), expected)
                 self.assertEqual(overlay.display_mode, mode)
                 self.assertEqual(overlay.window.isVisible(), visible)
